@@ -682,6 +682,102 @@ async def job_weekly_report_groups(ctx: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.warning(f"Could not DM manager {mgr_uid}: {e}")
 
+
+# ─── MEETINGS ────────────────────────────────────────────────────────────────
+
+async def meeting_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    data = load()
+    uid = str(update.effective_user.id)
+    if not is_manager(data, uid):
+        await update.message.reply_text("❌ Only managers can add meetings. Type `/manager PASSWORD` first.", parse_mode="Markdown")
+        return
+    if not ctx.args:
+        await update.message.reply_text(
+            "📅 *Meeting commands:*\n\n"
+            "`/meeting 14:00 Sales Call` — Add meeting\n"
+            "`/meeting list` — Today's meetings\n"
+            "`/meeting delete 1` — Delete by number",
+            parse_mode="Markdown"
+        )
+        return
+    if ctx.args[0].lower() == "list":
+        meetings = [m for m in data.get("meetings", []) if m.get("date") == today()]
+        if not meetings:
+            await update.message.reply_text("📅 No meetings today.", parse_mode="Markdown")
+            return
+        lines = ["📅 *Today's Meetings:*\n"]
+        for i, m in enumerate(sorted(meetings, key=lambda x: x["time"])):
+            lines.append(f"{i+1}. 🕐 *{m['time']}* — {m['title']} ({m.get('team','All')})")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        return
+    if ctx.args[0].lower() == "delete" and len(ctx.args) > 1:
+        try:
+            idx = int(ctx.args[1]) - 1
+            meetings = data.get("meetings", [])
+            if 0 <= idx < len(meetings):
+                removed = meetings.pop(idx)
+                data["meetings"] = meetings
+                save(data)
+                await update.message.reply_text(f"🗑 Deleted: *{removed['title']}*", parse_mode="Markdown")
+            else:
+                await update.message.reply_text("❌ Invalid number.", parse_mode="Markdown")
+        except:
+            await update.message.reply_text("❌ Type: `/meeting delete 1`", parse_mode="Markdown")
+        return
+    if len(ctx.args) < 2:
+        await update.message.reply_text("❌ Type: `/meeting 14:00 Title`", parse_mode="Markdown")
+        return
+    time_str = ctx.args[0]
+    title = " ".join(ctx.args[1:])
+    team = "All"
+    for t in TEAMS:
+        tag = "#" + t.split()[0].lower()
+        if tag in title.lower():
+            team = t
+            title = title.replace(tag, "").strip()
+            break
+    try:
+        datetime.strptime(time_str, "%H:%M")
+    except:
+        await update.message.reply_text("❌ Time must be HH:MM, e.g. `14:00`", parse_mode="Markdown")
+        return
+    meeting = {"time": time_str, "title": title.strip(), "team": team, "date": today()}
+    data.setdefault("meetings", []).append(meeting)
+    save(data)
+    meet_time = now_zurich().replace(hour=int(time_str.split(":")[0]), minute=int(time_str.split(":")[1]), second=0, microsecond=0)
+    remind_time = meet_time - timedelta(minutes=30)
+    reminder_info = ""
+    if remind_time > now_zurich():
+        delay = (remind_time - now_zurich()).total_seconds()
+        t_copy = title
+        team_copy = team
+        time_copy = time_str
+        async def reminder(c):
+            msg = f"⏰ *Meeting in 30 minutes!*\n\n📋 *{t_copy}*\n🕐 Starting at: *{time_copy}* (Zurich)\n👥 {team_copy}\n\nGet ready! 🚀"
+            d = load()
+            for gid in d.get("groups", []):
+                try:
+                    await c.bot.send_message(chat_id=int(gid), text=msg, parse_mode="Markdown")
+                except Exception as e:
+                    logger.warning(f"Group error: {e}")
+        ctx.application.job_queue.run_once(reminder, when=delay)
+        reminder_info = f"\n⏰ Reminder set for *{remind_time.strftime('%H:%M')}*"
+    await update.message.reply_text(
+        f"✅ *Meeting added!*\n\n🕐 *{time_str}* (Zurich)\n📋 {title}\n👥 {team}{reminder_info}",
+        parse_mode="Markdown"
+    )
+
+async def meetings_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    data = load()
+    meetings = [m for m in data.get("meetings", []) if m.get("date") == today()]
+    if not meetings:
+        await update.message.reply_text("📅 No meetings today.", parse_mode="Markdown")
+        return
+    lines = ["📅 *Today's Meetings:*\n"]
+    for m in sorted(meetings, key=lambda x: x["time"]):
+        lines.append(f"🕐 *{m['time']}* — {m['title']} ({m.get('team','All')})")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
 # ─── MAIN ────────────────────────────────────────────────────────────────────
 
 async def run():
@@ -705,6 +801,8 @@ async def run():
     app.add_handler(CommandHandler("teamreport", teamreport))
     app.add_handler(CommandHandler("timelog", timelog))
     app.add_handler(CommandHandler("listgroups", list_groups))
+    app.add_handler(CommandHandler("meeting", meeting_cmd))
+    app.add_handler(CommandHandler("meetings", meetings_today))
     app.add_handler(CallbackQueryHandler(button_callback))
 
     jq = app.job_queue
