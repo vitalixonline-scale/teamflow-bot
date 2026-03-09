@@ -20,8 +20,8 @@ DATA_FILE = "data.json"
 WEBSITE_URL = "https://vitalixonline-scale.github.io/teamflow-website"
 TZ = pytz.timezone("Europe/Zurich")
 
-TEAMS = ["Marketing Team", "Safe Offers Team", "ReSell Team", "New Sales Team", "Warehouse Team"]
-SUMMARY_TEAMS = ["Marketing Team", "ReSell Team", "New Sales Team", "Warehouse Team"]
+TEAMS = ["Marketing Team", "Safe Offers Team", "ReSell Team", "Sales Team", "Warehouse Team"]
+SUMMARY_TEAMS = ["Marketing Team", "ReSell Team", "Sales Team", "Warehouse Team"]
 
 MOTIVATIONS = [
     "🌅 Good morning! Today is a new opportunity to do great work. Let's make it count! 💪",
@@ -78,7 +78,7 @@ DAILY_ROUTINES = {
         "Daily recap (contacted, renewed, conversion %)",
         "Coordinate with Warehouse for hold order status",
     ],
-    "New Sales Team": [
+    "Sales Team": [
         "Review new orders from Shopify/WooCommerce",
         "Contact customers on WhatsApp (order confirmation)",
         "Confirm payment method (COD or Card)",
@@ -108,7 +108,7 @@ DAILY_ROUTINES = {
 SUMMARY_QUESTIONS = {
     "Marketing Team": "📢 *Marketing Team Daily Summary*\n\nPlease share:\n• Total spend today\n• Total revenue\n• Best ROAS account\n• Any issues?",
     "ReSell Team": "🔄 *ReSell Team Daily Summary*\n\nPlease share:\n• Customers contacted\n• Renewals closed\n• Conversion rate\n• Hold orders status",
-    "New Sales Team": "💼 *New Sales Team Daily Summary*\n\nPlease share:\n• New orders received\n• Confirmed orders\n• Rejected orders\n• COD vs Card split\n• Delivery rate",
+    "Sales Team": "💼 *Sales Team Daily Summary*\n\nPlease share:\n• New orders received\n• Confirmed orders\n• Rejected orders\n• COD vs Card split\n• Delivery rate",
     "Warehouse Team": "📦 *Warehouse Team Daily Summary*\n\nPlease share:\n• Orders packed & shipped\n• Unfulfilled orders\n• Returns received\n• Low stock alerts",
 }
 
@@ -476,7 +476,7 @@ async def recap_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             logger.warning(f"Group error: {e}")
 
 async def orders_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """New Sales Team: /orders [total] [confirmed] [rejected] [cod] [card]"""
+    """Sales Team: /orders [total] [confirmed] [rejected] [cod] [card]"""
     data = load()
     uid = str(update.effective_user.id)
     user = get_user(data, uid)
