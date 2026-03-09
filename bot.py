@@ -339,7 +339,7 @@ async def timelog(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 def main():
-    app = Application.builder().token(TOKEN).build()
+app = Application.builder().token(TOKEN).updater(None).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("register", register))
     app.add_handler(CommandHandler("clockin", clockin))
