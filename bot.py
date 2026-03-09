@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
-    MessageHandler, filters, ContextTypes
+    ContextTypes
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -15,6 +15,14 @@ logger = logging.getLogger(__name__)
 TOKEN = os.environ.get("BOT_TOKEN", "8774731842:AAHHHaVy-X3LFYFQa-kRWBBcrkiSzb23NVw")
 MANAGER_PASSWORD = os.environ.get("MANAGER_PASSWORD", "admin1234")
 DATA_FILE = "data.json"
+
+TEAMS = [
+    "Marketing Team",
+    "Safe Offers Team",
+    "ReSell Team",
+    "New Sales Team",
+    "Warehouse Team"
+]
 
 def load():
     try:
@@ -36,30 +44,26 @@ def fmt_dur(seconds):
     return f"{h}h {m}m"
 
 def get_user(data, uid):
-    uid = str(uid)
-    if uid not in data["users"]:
-        return None
-    return data["users"][uid]
+    return data["users"].get(str(uid))
 
 def is_manager(data, uid):
     return str(uid) in data.get("managers", [])
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 Dobrodošao/la u *TeamFlow Scale Bot!*\n\n"
-        "Da se registriraš, napiši:\n"
-        "`/register Ime Prezime`\n\n"
-        "Npr: `/register Ana Kovač`\n\n"
-        "📋 *Dostupne komande:*\n"
-        "/clockin — Prijava početka rada\n"
-        "/clockout — Odjava i zapis vremena\n"
-        "/status — Tvoj trenutni status\n"
-        "/tasks — Tvoji zadaci\n"
-        "/addtask — Dodaj zadatak\n"
-        "/daily — Dnevne rutine\n"
-        "/adddaily — Dodaj dnevnu rutinu\n"
-        "/report — Tvoj sedmični report\n"
-        "/manager — Admin prijava",
+        "👋 Welcome to *TeamFlow Scale Bot!*\n\n"
+        "To register, type:\n`/register Your Name`\n\n"
+        "📋 *Available commands:*\n"
+        "/clockin — Clock in\n"
+        "/clockout — Clock out\n"
+        "/status — Your current status\n"
+        "/tasks — Your tasks\n"
+        "/addtask — Add a task\n"
+        "/daily — Daily routines\n"
+        "/adddaily — Add daily routine\n"
+        "/report — Your weekly report\n"
+        "/setteam — Set your team\n"
+        "/manager — Admin login",
         parse_mode="Markdown"
     )
 
@@ -67,43 +71,57 @@ async def register(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     data = load()
     uid = str(update.effective_user.id)
     if not ctx.args:
-        await update.message.reply_text("❌ Napiši: `/register Ime Prezime`", parse_mode="Markdown")
+        await update.message.reply_text("❌ Type: `/register Your Name`", parse_mode="Markdown")
         return
     name = " ".join(ctx.args)
     if uid in data["users"]:
-        await update.message.reply_text(f"✅ Već si registriran/a kao *{data['users'][uid]['name']}*", parse_mode="Markdown")
+        await update.message.reply_text(f"✅ Already registered as *{data['users'][uid]['name']}*", parse_mode="Markdown")
         return
-    data["users"][uid] = {"name": name, "registered": today(), "clocked_in": False, "clock_start": None}
+    data["users"][uid] = {"name": name, "registered": today(), "clocked_in": False, "clock_start": None, "team": ""}
     data["sessions"][uid] = []
     data["todos"][uid] = []
     data["daily"][uid] = []
     save(data)
+
+    # Show team selection
+    keyboard = [[InlineKeyboardButton(t, callback_data=f"setteam_{t}")] for t in TEAMS]
     await update.message.reply_text(
-        f"✅ Registriran/a si kao *{name}*!\n\nPočni s `/clockin` kad počneš raditi! 🚀",
-        parse_mode="Markdown"
+        f"✅ Registered as *{name}*!\n\n🏷 Now select your team:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
+
+async def setteam_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
+    data = load()
+    if not get_user(data, uid):
+        await update.message.reply_text("❌ Not registered. Type `/register Your Name`", parse_mode="Markdown")
+        return
+    keyboard = [[InlineKeyboardButton(t, callback_data=f"setteam_{t}")] for t in TEAMS]
+    await update.message.reply_text("🏷 Select your team:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def clockin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     data = load()
     uid = str(update.effective_user.id)
     user = get_user(data, uid)
     if not user:
-        await update.message.reply_text("❌ Nisi registriran/a. Napiši `/register Ime Prezime`", parse_mode="Markdown")
+        await update.message.reply_text("❌ Not registered. Type `/register Your Name`", parse_mode="Markdown")
         return
     if user["clocked_in"]:
-        await update.message.reply_text(f"⚠️ Već si prijavljen/a od *{user['clock_start']}*.\nNapiši `/clockout` za odjavu.", parse_mode="Markdown")
+        await update.message.reply_text(f"⚠️ Already clocked in since *{user['clock_start']}*.\nType `/clockout` to clock out.", parse_mode="Markdown")
         return
     now = datetime.now()
     data["users"][uid]["clocked_in"] = True
     data["users"][uid]["clock_start"] = now.strftime("%H:%M")
     data["users"][uid]["clock_start_ts"] = now.timestamp()
     save(data)
+    team_line = f"\n🏷 {user.get('team', '')}" if user.get('team') else ""
     await update.message.reply_text(
-        f"▶️ *Prijavljeni ste!*\n\n"
-        f"👤 {user['name']}\n"
-        f"🕐 Početak: *{now.strftime('%H:%M')}*\n"
-        f"📅 Datum: {today()}\n\n"
-        f"Napiši `/clockout` kad završiš. Sretan rad! 💪",
+        f"▶️ *Clocked in!*\n\n"
+        f"👤 {user['name']}{team_line}\n"
+        f"🕐 Start: *{now.strftime('%H:%M')}*\n"
+        f"📅 {today()}\n\n"
+        f"Type `/clockout` when done. Good work! 💪",
         parse_mode="Markdown"
     )
 
@@ -112,30 +130,25 @@ async def clockout(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     user = get_user(data, uid)
     if not user:
-        await update.message.reply_text("❌ Nisi registriran/a.", parse_mode="Markdown")
+        await update.message.reply_text("❌ Not registered.", parse_mode="Markdown")
         return
     if not user["clocked_in"]:
-        await update.message.reply_text("⚠️ Nisi prijavljen/a. Napiši `/clockin`", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ Not clocked in. Type `/clockin`", parse_mode="Markdown")
         return
     now = datetime.now()
     start_time = user["clock_start"]
     duration = now.timestamp() - user["clock_start_ts"]
-    data["sessions"][uid].append({
-        "date": today(),
-        "start": start_time,
-        "end": now.strftime("%H:%M"),
-        "duration_sec": duration
-    })
+    data["sessions"][uid].append({"date": today(), "start": start_time, "end": now.strftime("%H:%M"), "duration_sec": duration})
     data["users"][uid]["clocked_in"] = False
     data["users"][uid]["clock_start"] = None
     data["users"][uid]["clock_start_ts"] = None
     save(data)
     await update.message.reply_text(
-        f"■ *Odjavljeni ste!*\n\n"
+        f"■ *Clocked out!*\n\n"
         f"👤 {user['name']}\n"
         f"🕐 {start_time} → {now.strftime('%H:%M')}\n"
-        f"⏱ Ukupno: *{fmt_dur(duration)}*\n\n"
-        f"Odličan rad! Vidimo se sutra. 👋",
+        f"⏱ Duration: *{fmt_dur(duration)}*\n\n"
+        f"Great work! See you tomorrow. 👋",
         parse_mode="Markdown"
     )
 
@@ -144,23 +157,24 @@ async def status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     user = get_user(data, uid)
     if not user:
-        await update.message.reply_text("❌ Nisi registriran/a.", parse_mode="Markdown")
+        await update.message.reply_text("❌ Not registered.", parse_mode="Markdown")
         return
     today_sessions = [s for s in data["sessions"].get(uid, []) if s["date"] == today()]
     today_sec = sum(s["duration_sec"] for s in today_sessions)
     if user["clocked_in"] and user.get("clock_start_ts"):
         today_sec += datetime.now().timestamp() - user["clock_start_ts"]
-        st = f"🟢 *Online* — radi od {user['clock_start']}"
+        st = f"🟢 *Online* — since {user['clock_start']}"
     else:
         st = "🔴 *Offline*"
     todos = data["todos"].get(uid, [])
     done = sum(1 for t in todos if t.get("done"))
+    team_line = f"\n🏷 {user.get('team', 'No team set')}" if user.get('team') else "\n🏷 No team set — use /setteam"
     await update.message.reply_text(
-        f"📊 *Status — {user['name']}*\n\n"
+        f"📊 *Status — {user['name']}*{team_line}\n\n"
         f"{st}\n"
-        f"⏱ Danas: *{fmt_dur(today_sec)}*\n"
-        f"📋 Sesija danas: *{len(today_sessions) + (1 if user['clocked_in'] else 0)}*\n"
-        f"✅ Zadaci: *{done}/{len(todos)}*",
+        f"⏱ Today: *{fmt_dur(today_sec)}*\n"
+        f"📋 Sessions: *{len(today_sessions) + (1 if user['clocked_in'] else 0)}*\n"
+        f"✅ Tasks: *{done}/{len(todos)}*",
         parse_mode="Markdown"
     )
 
@@ -169,20 +183,20 @@ async def tasks(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     user = get_user(data, uid)
     if not user:
-        await update.message.reply_text("❌ Nisi registriran/a.", parse_mode="Markdown")
+        await update.message.reply_text("❌ Not registered.", parse_mode="Markdown")
         return
     todos = data["todos"].get(uid, [])
     if not todos:
-        await update.message.reply_text("📋 Nemaš zadataka.\n\nDodaj: `/addtask Naziv`", parse_mode="Markdown")
+        await update.message.reply_text("📋 No tasks yet.\n\nAdd one: `/addtask Task name`", parse_mode="Markdown")
         return
     pri = {"h": "🔴", "m": "🟡", "l": "🟢"}
-    lines = [f"📋 *Zadaci — {user['name']}*\n"]
+    lines = [f"📋 *Tasks — {user['name']}*\n"]
     keyboard = []
     for i, t in enumerate(todos):
         check = "✅" if t.get("done") else "⬜"
         lines.append(f"{check} {pri.get(t.get('pri','m'),'🟡')} {t['text']}")
         keyboard.append([InlineKeyboardButton(f"{check} {t['text'][:35]}", callback_data=f"toggle_{i}")])
-    keyboard.append([InlineKeyboardButton("🗑 Obriši završene", callback_data="delete_done")])
+    keyboard.append([InlineKeyboardButton("🗑 Delete completed", callback_data="delete_done")])
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def addtask(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -190,44 +204,49 @@ async def addtask(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     user = get_user(data, uid)
     if not user:
-        await update.message.reply_text("❌ Nisi registriran/a.", parse_mode="Markdown")
+        await update.message.reply_text("❌ Not registered.", parse_mode="Markdown")
         return
     if not ctx.args:
-        await update.message.reply_text("❌ Napiši: `/addtask Naziv #visoki/#srednji/#niski`", parse_mode="Markdown")
+        await update.message.reply_text("❌ Type: `/addtask Task name #high/#medium/#low`", parse_mode="Markdown")
         return
     text = " ".join(ctx.args)
     pri = "m"
-    if "#visoki" in text:
-        pri = "h"
-        text = text.replace("#visoki", "").strip()
-    elif "#niski" in text:
-        pri = "l"
-        text = text.replace("#niski", "").strip()
-    elif "#srednji" in text:
-        text = text.replace("#srednji", "").strip()
+    if "#high" in text: pri = "h"; text = text.replace("#high", "").strip()
+    elif "#low" in text: pri = "l"; text = text.replace("#low", "").strip()
+    elif "#medium" in text: text = text.replace("#medium", "").strip()
     data["todos"][uid].append({"text": text, "pri": pri, "done": False, "created": today()})
     save(data)
-    pri_txt = {"h": "🔴 Visoki", "m": "🟡 Srednji", "l": "🟢 Niski"}
-    await update.message.reply_text(f"✅ Zadatak dodan: *{text}*\n{pri_txt[pri]} prioritet", parse_mode="Markdown")
+    pri_txt = {"h": "🔴 High", "m": "🟡 Medium", "l": "🟢 Low"}
+    await update.message.reply_text(f"✅ Task added: *{text}*\n{pri_txt[pri]} priority", parse_mode="Markdown")
 
 async def button_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = load()
     uid = str(query.from_user.id)
+
+    if query.data.startswith("setteam_"):
+        team = query.data.replace("setteam_", "")
+        if uid in data["users"]:
+            data["users"][uid]["team"] = team
+            save(data)
+            await query.edit_message_text(f"✅ Team set to *{team}*!\n\nYou're all set. Type `/clockin` to start working! 🚀", parse_mode="Markdown")
+        return
+
     if query.data.startswith("toggle_"):
         idx = int(query.data.split("_")[1])
         todos = data["todos"].get(uid, [])
         if idx < len(todos):
             todos[idx]["done"] = not todos[idx]["done"]
             save(data)
-            s = "✅ Završeno" if todos[idx]["done"] else "⬜ Nije završeno"
-            await query.edit_message_text(f"{s}: *{todos[idx]['text']}*\n\nNapiši /tasks za listu.", parse_mode="Markdown")
+            s = "✅ Done" if todos[idx]["done"] else "⬜ Undone"
+            await query.edit_message_text(f"{s}: *{todos[idx]['text']}*\n\nType /tasks for the list.", parse_mode="Markdown")
     elif query.data == "delete_done":
         before = len(data["todos"].get(uid, []))
         data["todos"][uid] = [t for t in data["todos"].get(uid, []) if not t.get("done")]
+        deleted = before - len(data["todos"][uid])
         save(data)
-        await query.edit_message_text(f"🗑 Obrisano {before - len(data['todos'][uid])} zadataka.")
+        await query.edit_message_text(f"🗑 Deleted {deleted} completed tasks.")
     elif query.data.startswith("daily_"):
         idx = int(query.data.split("_")[1])
         daily = data["daily"].get(uid, [])
@@ -235,24 +254,24 @@ async def button_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             daily[idx]["done_date"] = None if daily[idx].get("done_date") == today() else today()
             save(data)
             done = sum(1 for d in daily if d.get("done_date") == today())
-            await query.edit_message_text(f"📋 {done}/{len(daily)} završeno danas.\n\nNapiši /daily za listu.", parse_mode="Markdown")
+            await query.edit_message_text(f"📋 {done}/{len(daily)} completed today.\n\nType /daily for the list.", parse_mode="Markdown")
 
 async def daily(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     data = load()
     uid = str(update.effective_user.id)
     user = get_user(data, uid)
     if not user:
-        await update.message.reply_text("❌ Nisi registriran/a.", parse_mode="Markdown")
+        await update.message.reply_text("❌ Not registered.", parse_mode="Markdown")
         return
     daily_list = data["daily"].get(uid, [])
     if not daily_list:
-        await update.message.reply_text("📋 Nemaš rutina.\n\nDodaj: `/adddaily Naziv`", parse_mode="Markdown")
+        await update.message.reply_text("📋 No routines yet.\n\nAdd one: `/adddaily Routine name`", parse_mode="Markdown")
         return
     t = today()
     done = sum(1 for d in daily_list if d.get("done_date") == t)
     pct = int(done / len(daily_list) * 100)
     bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
-    lines = [f"📋 *Rutine — {user['name']}*\n`{bar}` {pct}%\n"]
+    lines = [f"📋 *Daily Routines — {user['name']}*\n`{bar}` {pct}%\n"]
     keyboard = []
     for i, d in enumerate(daily_list):
         check = "✅" if d.get("done_date") == t else "⬜"
@@ -265,22 +284,22 @@ async def adddaily(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     user = get_user(data, uid)
     if not user:
-        await update.message.reply_text("❌ Nisi registriran/a.", parse_mode="Markdown")
+        await update.message.reply_text("❌ Not registered.", parse_mode="Markdown")
         return
     if not ctx.args:
-        await update.message.reply_text("❌ Napiši: `/adddaily Naziv rutine`", parse_mode="Markdown")
+        await update.message.reply_text("❌ Type: `/adddaily Routine name`", parse_mode="Markdown")
         return
     text = " ".join(ctx.args)
     data["daily"][uid].append({"text": text, "done_date": None})
     save(data)
-    await update.message.reply_text(f"✅ Rutina dodana: *{text}*", parse_mode="Markdown")
+    await update.message.reply_text(f"✅ Routine added: *{text}*", parse_mode="Markdown")
 
 async def report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     data = load()
     uid = str(update.effective_user.id)
     user = get_user(data, uid)
     if not user:
-        await update.message.reply_text("❌ Nisi registriran/a.", parse_mode="Markdown")
+        await update.message.reply_text("❌ Not registered.", parse_mode="Markdown")
         return
     sessions = data["sessions"].get(uid, [])
     today_sec = sum(s["duration_sec"] for s in sessions if s["date"] == today())
@@ -288,40 +307,39 @@ async def report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     total_sec = sum(s["duration_sec"] for s in sessions)
     if user["clocked_in"] and user.get("clock_start_ts"):
         extra = datetime.now().timestamp() - user["clock_start_ts"]
-        today_sec += extra
-        week_sec += extra
-        total_sec += extra
+        today_sec += extra; week_sec += extra; total_sec += extra
     todos = data["todos"].get(uid, [])
     done_tasks = sum(1 for t in todos if t.get("done"))
     daily_list = data["daily"].get(uid, [])
     daily_done = sum(1 for d in daily_list if d.get("done_date") == today())
+    team_line = f"\n🏷 {user.get('team', '')}" if user.get('team') else ""
     await update.message.reply_text(
-        f"📊 *Report — {user['name']}*\n📅 {today()}\n\n"
-        f"⏱ *Radno Vrijeme*\n"
-        f"• Danas: {fmt_dur(today_sec)}\n"
-        f"• Ovaj tjedan: {fmt_dur(week_sec)}\n"
-        f"• Ukupno: {fmt_dur(total_sec)}\n\n"
-        f"✅ *Zadaci*\n"
-        f"• Završeno: {done_tasks}/{len(todos)}\n\n"
-        f"📋 *Dnevne Rutine Danas*\n"
-        f"• {daily_done}/{len(daily_list)} završeno",
+        f"📊 *Report — {user['name']}*{team_line}\n📅 {today()}\n\n"
+        f"⏱ *Working Hours*\n"
+        f"• Today: {fmt_dur(today_sec)}\n"
+        f"• This week: {fmt_dur(week_sec)}\n"
+        f"• Total: {fmt_dur(total_sec)}\n\n"
+        f"✅ *Tasks*\n"
+        f"• Completed: {done_tasks}/{len(todos)}\n\n"
+        f"📋 *Daily Routines Today*\n"
+        f"• {daily_done}/{len(daily_list)} completed",
         parse_mode="Markdown"
     )
 
 async def manager_login(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
     if not ctx.args or ctx.args[0] != MANAGER_PASSWORD:
-        await update.message.reply_text("🔐 Napiši: `/manager LOZINKA`", parse_mode="Markdown")
+        await update.message.reply_text("🔐 Type: `/manager PASSWORD`", parse_mode="Markdown")
         return
     data = load()
-    uid = str(update.effective_user.id)
     if uid not in data.get("managers", []):
         data.setdefault("managers", []).append(uid)
         save(data)
     await update.message.reply_text(
-        "✅ *Admin pristup odobren!*\n\n"
-        "/teamstatus — Status cijelog tima\n"
-        "/teamreport — Sedmični report tima\n"
-        "/timelog — Evidencija radnog vremena",
+        "✅ *Admin access granted!*\n\n"
+        "/teamstatus — Team status\n"
+        "/teamreport — Weekly report\n"
+        "/timelog — Time log",
         parse_mode="Markdown"
     )
 
@@ -329,13 +347,13 @@ async def teamstatus(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     data = load()
     uid = str(update.effective_user.id)
     if not is_manager(data, uid):
-        await update.message.reply_text("❌ Nemaš admin pristup.", parse_mode="Markdown")
+        await update.message.reply_text("❌ No admin access.", parse_mode="Markdown")
         return
     if not data["users"]:
-        await update.message.reply_text("👥 Nema registriranih članova.", parse_mode="Markdown")
+        await update.message.reply_text("👥 No registered members yet.", parse_mode="Markdown")
         return
     online = sum(1 for u in data["users"].values() if u.get("clocked_in"))
-    lines = [f"👥 *Status Tima — {today()}*\n🟢 Online: {online}/{len(data['users'])}\n"]
+    lines = [f"👥 *Team Status — {today()}*\n🟢 Online: {online}/{len(data['users'])}\n"]
     for uid_m, user in data["users"].items():
         is_on = user.get("clocked_in", False)
         sec = sum(s["duration_sec"] for s in data["sessions"].get(uid_m, []) if s["date"] == today())
@@ -344,17 +362,18 @@ async def teamstatus(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         todos = data["todos"].get(uid_m, [])
         done = sum(1 for t in todos if t.get("done"))
         icon = "🟢" if is_on else "🔴"
-        lines.append(f"{icon} *{user['name']}*\n   ⏱ {fmt_dur(sec)} | ✅ {done}/{len(todos)}")
+        team = user.get('team', 'No team')
+        lines.append(f"{icon} *{user['name']}* — {team}\n   ⏱ {fmt_dur(sec)} | ✅ {done}/{len(todos)}")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 async def teamreport(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     data = load()
     uid = str(update.effective_user.id)
     if not is_manager(data, uid):
-        await update.message.reply_text("❌ Nemaš admin pristup.", parse_mode="Markdown")
+        await update.message.reply_text("❌ No admin access.", parse_mode="Markdown")
         return
     week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
-    lines = [f"📊 *Sedmični Report Tima*\n📅 {week_ago} → {today()}\n"]
+    lines = [f"📊 *Weekly Team Report*\n📅 {week_ago} → {today()}\n"]
     total = 0
     for uid_m, user in data["users"].items():
         sec = sum(s["duration_sec"] for s in data["sessions"].get(uid_m, []) if s["date"] >= week_ago)
@@ -362,39 +381,38 @@ async def teamreport(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         todos = data["todos"].get(uid_m, [])
         done = sum(1 for t in todos if t.get("done"))
         pct = f"{int(done/len(todos)*100)}%" if todos else "—"
-        lines.append(f"👤 *{user['name']}*\n   ⏱ {fmt_dur(sec)} | ✅ {done}/{len(todos)} ({pct})")
-    lines.append(f"\n⏱ *Ukupno tim: {fmt_dur(total)}*")
+        team = user.get('team', 'No team')
+        lines.append(f"👤 *{user['name']}* — {team}\n   ⏱ {fmt_dur(sec)} | ✅ {done}/{len(todos)} ({pct})")
+    lines.append(f"\n⏱ *Total team: {fmt_dur(total)}*")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 async def timelog(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     data = load()
     uid = str(update.effective_user.id)
     if not is_manager(data, uid):
-        await update.message.reply_text("❌ Nemaš admin pristup.", parse_mode="Markdown")
+        await update.message.reply_text("❌ No admin access.", parse_mode="Markdown")
         return
-    lines = [f"⏱ *Evidencija — {today()}*\n"]
+    lines = [f"⏱ *Time Log — {today()}*\n"]
     found = False
     for uid_m, user in data["users"].items():
         sessions = [s for s in data["sessions"].get(uid_m, []) if s["date"] == today()]
         if user.get("clocked_in") and user.get("clock_start_ts"):
-            sessions.append({
-                "start": user["clock_start"],
-                "end": "● sada",
-                "duration_sec": datetime.now().timestamp() - user["clock_start_ts"]
-            })
+            sessions.append({"start": user["clock_start"], "end": "● now", "duration_sec": datetime.now().timestamp() - user["clock_start_ts"]})
         if sessions:
             found = True
-            lines.append(f"👤 *{user['name']}*")
+            team = user.get('team', '')
+            lines.append(f"👤 *{user['name']}*{' — '+team if team else ''}")
             for s in sessions:
                 lines.append(f"   {s['start']} → {s['end']} | {fmt_dur(s['duration_sec'])}")
     if not found:
-        lines.append("Nema sesija danas.")
+        lines.append("No sessions today.")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 async def run():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("register", register))
+    app.add_handler(CommandHandler("setteam", setteam_cmd))
     app.add_handler(CommandHandler("clockin", clockin))
     app.add_handler(CommandHandler("clockout", clockout))
     app.add_handler(CommandHandler("status", status))
@@ -408,7 +426,7 @@ async def run():
     app.add_handler(CommandHandler("teamreport", teamreport))
     app.add_handler(CommandHandler("timelog", timelog))
     app.add_handler(CallbackQueryHandler(button_callback))
-    print("✅ TeamFlow bot pokrenut!")
+    print("✅ TeamFlow bot started!")
     async with app:
         await app.start()
         await app.updater.start_polling(drop_pending_updates=True)
