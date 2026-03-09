@@ -42,6 +42,9 @@ def is_manager(data, uid):
     return str(uid) in data.get("managers", [])
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    keyboard = [[
+        InlineKeyboardButton("🌐 Open TeamFlow Website", url="https://vitalixonline-scale.github.io/teamflow-website")
+    ]]
     await update.message.reply_text(
         "👋 Welcome to *TeamFlow Scale Bot!*\n\n"
         "To get started, type:\n"
@@ -56,7 +59,8 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/daily — Daily routines\n"
         "/adddaily — Add routine\n"
         "/report — Weekly report",
-        parse_mode="Markdown"
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 async def register(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
