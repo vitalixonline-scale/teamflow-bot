@@ -5,6 +5,12 @@ import asyncio
 import aiohttp
 from datetime import datetime, timedelta
 import pytz
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+    GSPREAD_AVAILABLE = True
+except ImportError:
+    GSPREAD_AVAILABLE = False
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, BotCommandScopeDefault, BotCommandScopeChat
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -28,6 +34,77 @@ BRAND_TARGETS = {
     "Vitalix Italy": 5000,
 }
 ROAS_MINIMUM = 3.5
+SHEET_ID = "1t196V5wuL857hVPKTZPvjr3RWOPf3dc1ncYZI5jJGZo"
+SHEET_SCOPES = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+
+def get_sheet_client():
+    """Get authenticated gspread client from env credentials"""
+    if not GSPREAD_AVAILABLE:
+        return None
+    try:
+        creds_json = os.environ.get("GOOGLE_CREDENTIALS", "")
+        if not creds_json:
+            return None
+        creds_dict = json.loads(creds_json)
+        creds = Credentials.from_service_account_info(creds_dict, scopes=SHEET_SCOPES)
+        return gspread.authorize(creds)
+    except Exception as e:
+        logger.warning(f"Google Sheets auth error: {e}")
+        return None
+
+def get_today_sheet_data(brand_tab="VSmedic"):
+    """Read today's Gross and Ads from sheet for a brand tab"""
+    try:
+        client = get_sheet_client()
+        if not client:
+            return None
+        sh = client.open_by_key(SHEET_ID)
+        ws = sh.worksheet(brand_tab)
+        today_date = datetime.now(TZ)
+        month_name = today_date.strftime("%B")
+        day = today_date.day
+        
+        # Find month row and get day column
+        all_values = ws.get_all_values()
+        for i, row in enumerate(all_values):
+            if len(row) > 2 and row[2] == month_name:
+                # row[i+1] = Gross, row[i+2] = Ads
+                # day column = 2 + day (col 3 = day 1)
+                col = 2 + day
+                gross_row = all_values[i+1] if i+1 < len(all_values) else []
+                ads_row = all_values[i+2] if i+2 < len(all_values) else []
+                
+                def parse_val(r, c):
+                    try:
+                        if c < len(r):
+                            v = r[c].replace("€","").replace("$","").replace(",","").strip()
+                            return float(v) if v and v != "#DIV/0!" else 0
+                    except:
+                        pass
+                    return 0
+                
+                gross = parse_val(gross_row, col)
+                ads = parse_val(ads_row, col)
+                roas = round(gross/ads, 2) if ads > 0 else 0
+                
+                # Also get monthly totals (col 2 = monthly total)
+                gross_month = parse_val(gross_row, 2)
+                ads_month = parse_val(ads_row, 2)
+                
+                return {
+                    "brand": brand_tab,
+                    "date": today_date.strftime("%d.%m.%Y"),
+                    "gross_today": gross,
+                    "ads_today": ads,
+                    "roas_today": roas,
+                    "gross_month": gross_month,
+                    "ads_month": ads_month,
+                    "roas_month": round(gross_month/ads_month, 2) if ads_month > 0 else 0
+                }
+        return None
+    except Exception as e:
+        logger.warning(f"Sheet read error: {e}")
+        return None
 SUMMARY_TEAMS = ["Marketing Team", "ReSell Team", "Sales Team", "Warehouse Team"]
 
 MOTIVATIONS = [
@@ -914,6 +991,38 @@ async def meeting_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Meeting added!\n\n🕐 *{time_str}* — {title}{reminder_msg}", parse_mode="Markdown")
 
 
+async def sheetreport_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Anyone can request sheet report: /sheetreport [brand]"""
+    brand = " ".join(ctx.args) if ctx.args else "VSmedic"
+    await update.message.reply_text(f"📊 Reading sheet for *{brand}*...", parse_mode="Markdown")
+    data_sheet = get_today_sheet_data(brand)
+    if not data_sheet:
+        await update.message.reply_text(
+        await update.message.reply_text(
+            f"Could not read sheet for *{brand}*. Check: Sheet shared with bot? API enabled?",
+            parse_mode="Markdown"
+        )
+        )
+        return
+    target = BRAND_TARGETS.get(brand, 0)
+    target_emoji = "✅" if data_sheet["gross_today"] >= target else "⚠️" if data_sheet["gross_today"] >= target*0.7 else "🔴"
+    roas_emoji = "✅" if data_sheet["roas_today"] >= ROAS_MINIMUM else "🚨"
+    d = data_sheet
+    msg = "📊 *Sheet Report — " + brand + "*\n"
+    msg += "📅 " + d["date"] + "\n\n"
+    msg += "*Today:*\n"
+    msg += "💰 Gross: *" + f"{d['gross_today']:,.0f}" + "€* " + target_emoji + "\n"
+    msg += "💸 Ads: *" + f"{d['ads_today']:,.0f}" + "€*\n"
+    msg += "📈 ROAS: *" + str(d["roas_today"]) + "* " + roas_emoji + "\n\n"
+    msg += "*This Month:*\n"
+    msg += "💰 Gross: *" + f"{d['gross_month']:,.0f}" + "€*\n"
+    msg += "💸 Ads: *" + f"{d['ads_month']:,.0f}" + "€*\n"
+    msg += "📈 ROAS: *" + str(d["roas_month"]) + "*"
+    if target > 0:
+        msg += "\n\n🎯 Daily target: *" + f"{target:,}" + "€*"
+
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
 async def announce_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Manager only: /announce Message — sends to all groups"""
     data = load()
@@ -1174,6 +1283,48 @@ async def job_overdue_tasks(ctx: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.warning(f"DM error: {e}")
 
+async def job_sheet_daily_report(ctx: ContextTypes.DEFAULT_TYPE):
+    """17:00 — Auto read sheet and post daily report to groups"""
+    if not is_weekday(): return
+    data = load()
+    brands = list(BRAND_TARGETS.keys())
+    msgs = []
+    for brand in brands:
+        sheet_data = get_today_sheet_data(brand)
+        if sheet_data and (sheet_data["gross_today"] > 0 or sheet_data["ads_today"] > 0):
+            target = BRAND_TARGETS.get(brand, 0)
+            target_emoji = "✅" if sheet_data["gross_today"] >= target else "⚠️" if sheet_data["gross_today"] >= target*0.7 else "🔴"
+            roas_emoji = "✅" if sheet_data["roas_today"] >= ROAS_MINIMUM else "🚨"
+            msgs.append(
+                "📱 *" + brand + "*\n"
+                + "   💰 " + f"{sheet_data['gross_today']:,.0f}" + "€ " + target_emoji
+                + " | 💸 " + f"{sheet_data['ads_today']:,.0f}" + "€"
+                + " | 📈 ROAS " + str(sheet_data["roas_today"]) + " " + roas_emoji
+            )
+    if msgs:
+        full_msg = "📊 *Daily ADS Report — " + today() + "*\n\n" + "\n".join(msgs)
+        roas_alerts = []
+        for brand in brands:
+            sd = get_today_sheet_data(brand)
+            if sd and sd["roas_today"] > 0 and sd["roas_today"] < ROAS_MINIMUM:
+                roas_alerts.append("🚨 *" + brand + "* ROAS: " + str(sd["roas_today"]) + " (min: " + str(ROAS_MINIMUM) + ")")
+        if roas_alerts:
+            full_msg += "\n\n⚠️ *ROAS ALERTS:*\n" + "\n".join(roas_alerts)
+        for gid in data.get("groups", []):
+            try:
+                await ctx.bot.send_message(chat_id=int(gid), text=full_msg, parse_mode="Markdown")
+            except Exception as e:
+                logger.warning(f"Group error: {e}")
+            try:
+                await ctx.bot.send_message(chat_id=int(gid), text=full_msg, parse_mode="Markdown")
+            except Exception as e:
+                logger.warning(f"Group error: {e}")
+        for mgr_uid in data.get("managers", []):
+            try:
+                await ctx.bot.send_message(chat_id=int(mgr_uid), text=full_msg, parse_mode="Markdown")
+            except Exception as e:
+                logger.warning(f"Manager DM error: {e}")
+
 async def job_eod_personal_summary(ctx: ContextTypes.DEFAULT_TYPE):
     if not is_weekday(): return
     data = load()
@@ -1367,6 +1518,7 @@ async def run():
     app.add_handler(CommandHandler("meeting", meeting_cmd))
     app.add_handler(CommandHandler("meetings", meetings_today))
     app.add_handler(CommandHandler("announce", announce_cmd))
+    app.add_handler(CommandHandler("sheetreport", sheetreport_cmd))
     app.add_handler(CommandHandler("targets", targets_cmd))
 
     # Manager
@@ -1391,6 +1543,7 @@ async def run():
     jq.run_daily(job_manager_late_alert,      time=datetime.strptime("10:30", "%H:%M").replace(tzinfo=TZ).timetz())
     jq.run_daily(job_daily_summary_groups,    time=datetime.strptime("14:00", "%H:%M").replace(tzinfo=TZ).timetz())
     jq.run_daily(job_overdue_tasks,           time=datetime.strptime("16:00", "%H:%M").replace(tzinfo=TZ).timetz())
+    jq.run_daily(job_sheet_daily_report,      time=datetime.strptime("17:00", "%H:%M").replace(tzinfo=TZ).timetz())
     jq.run_daily(job_eod_personal_summary,    time=datetime.strptime("17:30", "%H:%M").replace(tzinfo=TZ).timetz())
     jq.run_daily(job_clockout_reminder,       time=datetime.strptime("18:00", "%H:%M").replace(tzinfo=TZ).timetz())
     jq.run_daily(job_manager_daily_digest,    time=datetime.strptime("18:30", "%H:%M").replace(tzinfo=TZ).timetz())
