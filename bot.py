@@ -5,7 +5,7 @@ import asyncio
 import aiohttp
 from datetime import datetime, timedelta
 import pytz
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, BotCommandScopeDefault, BotCommandScopeChat
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     ContextTypes
@@ -1002,97 +1002,12 @@ async def button_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if team in DAILY_ROUTINES:
                 data["daily"][uid] = [{"text": r, "done_date": None} for r in DAILY_ROUTINES[team]]
             save(data)
-            # Set team-specific commands
-            if team == "Marketing Team":
-                cmds = [
-                    BotCommand("start","👋 Open TeamFlow"),
-                    BotCommand("clockin","▶️ Clock in"),
-                    BotCommand("clockout","■ Clock out"),
-                    BotCommand("status","📊 My status"),
-                    BotCommand("tasks","✅ My tasks"),
-                    BotCommand("addtask","➕ Add task"),
-                    BotCommand("daily","📋 Daily routines"),
-                    BotCommand("goals","🎯 Set daily goals"),
-                    BotCommand("report","📈 My report"),
-                    BotCommand("meetings","📅 Today's meetings"),
-                    BotCommand("targets","🎯 ADS targets"),
-                    BotCommand("recap","📢 Log marketing recap"),
-                    BotCommand("checklinks","🌐 Check landing pages"),
-                    BotCommand("adddomain","➕ Add domain"),
-                ]
-            elif team == "Safe Offers Team":
-                cmds = [
-                    BotCommand("start","👋 Open TeamFlow"),
-                    BotCommand("clockin","▶️ Clock in"),
-                    BotCommand("clockout","■ Clock out"),
-                    BotCommand("status","📊 My status"),
-                    BotCommand("tasks","✅ My tasks"),
-                    BotCommand("addtask","➕ Add task"),
-                    BotCommand("daily","📋 Daily routines"),
-                    BotCommand("goals","🎯 Set daily goals"),
-                    BotCommand("report","📈 My report"),
-                    BotCommand("meetings","📅 Today's meetings"),
-                    BotCommand("newoffer","🎯 New offer checklist"),
-                    BotCommand("checklinks","🌐 Check landing pages"),
-                    BotCommand("adddomain","➕ Add domain"),
-                ]
-            elif team == "ReSell Team":
-                cmds = [
-                    BotCommand("start","👋 Open TeamFlow"),
-                    BotCommand("clockin","▶️ Clock in"),
-                    BotCommand("clockout","■ Clock out"),
-                    BotCommand("status","📊 My status"),
-                    BotCommand("tasks","✅ My tasks"),
-                    BotCommand("addtask","➕ Add task"),
-                    BotCommand("daily","📋 Daily routines"),
-                    BotCommand("goals","🎯 Set daily goals"),
-                    BotCommand("report","📈 My report"),
-                    BotCommand("meetings","📅 Today's meetings"),
-                    BotCommand("resell","🔄 Log ReSell stats"),
-                ]
-            elif team == "Sales Team":
-                cmds = [
-                    BotCommand("start","👋 Open TeamFlow"),
-                    BotCommand("clockin","▶️ Clock in"),
-                    BotCommand("clockout","■ Clock out"),
-                    BotCommand("status","📊 My status"),
-                    BotCommand("tasks","✅ My tasks"),
-                    BotCommand("addtask","➕ Add task"),
-                    BotCommand("daily","📋 Daily routines"),
-                    BotCommand("goals","🎯 Set daily goals"),
-                    BotCommand("report","📈 My report"),
-                    BotCommand("meetings","📅 Today's meetings"),
-                    BotCommand("orders","💼 Log orders"),
-                    BotCommand("delivery","🚚 Log delivery rate"),
-                ]
-            elif team == "Warehouse Team":
-                cmds = [
-                    BotCommand("start","👋 Open TeamFlow"),
-                    BotCommand("clockin","▶️ Clock in"),
-                    BotCommand("clockout","■ Clock out"),
-                    BotCommand("status","📊 My status"),
-                    BotCommand("tasks","✅ My tasks"),
-                    BotCommand("addtask","➕ Add task"),
-                    BotCommand("daily","📋 Daily routines"),
-                    BotCommand("goals","🎯 Set daily goals"),
-                    BotCommand("report","📈 My report"),
-                    BotCommand("meetings","📅 Today's meetings"),
-                    BotCommand("shipped","📦 Log shipped"),
-                    BotCommand("stock","📦 Update stock"),
-                ]
-            else:
-                cmds = []
-            if cmds:
-                try:
-                    from telegram import BotCommandScopeChat
-                    await ctx.bot.set_my_commands(cmds, scope=BotCommandScopeChat(chat_id=int(uid)))
-                except Exception as e:
-                    logger.warning(f"Could not set commands: {e}")
-
             await query.edit_message_text(
-                f"✅ Team set to *{team}*!\n\n📋 Daily routines loaded automatically.\n\nType `/clockin` to start! 🚀",
+                f"✅ Team set to *{team}*!\n\n📋 Daily routines loaded.\n\nType `/clockin` to start! 🚀",
                 parse_mode="Markdown"
             )
+        return
+
         return
 
     if query.data.startswith("gteam_"):
