@@ -913,6 +913,35 @@ async def meeting_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         reminder_msg = f"\n⏰ Reminder at *{remind_time.strftime('%H:%M')}*"
     await update.message.reply_text(f"✅ Meeting added!\n\n🕐 *{time_str}* — {title}{reminder_msg}", parse_mode="Markdown")
 
+
+async def announce_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Manager only: /announce Message — sends to all groups"""
+    data = load()
+    uid = str(update.effective_user.id)
+    if not is_manager(data, uid):
+        await update.message.reply_text("❌ Only managers can send announcements.", parse_mode="Markdown")
+        return
+    if not ctx.args:
+        await update.message.reply_text(
+            "📣 *Announce to all groups:*\n\n`/announce Your message here`\n\nExample:\n`/announce Meeting today at 15:00!`",
+            parse_mode="Markdown"
+        )
+        return
+    message = " ".join(ctx.args)
+    groups = data.get("groups", [])
+    if not groups:
+        await update.message.reply_text("❌ No groups registered.", parse_mode="Markdown")
+        return
+    msg = f"📣 *Announcement from Management*\n\n{message}"
+    sent = 0
+    for gid in groups:
+        try:
+            await ctx.bot.send_message(chat_id=int(gid), text=msg, parse_mode="Markdown")
+            sent += 1
+        except Exception as e:
+            logger.warning(f"Group error: {e}")
+    await update.message.reply_text(f"✅ Sent to *{sent}* group(s)!", parse_mode="Markdown")
+
 async def targets_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Anyone can check daily brand targets"""
     data = load()
