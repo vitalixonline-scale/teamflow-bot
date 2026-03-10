@@ -990,7 +990,7 @@ async def meetings_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def button_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await query.answer()  # Always answer first to stop loading spinner
     data = load()
     uid = str(query.from_user.id)
 
