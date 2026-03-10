@@ -21,6 +21,13 @@ WEBSITE_URL = "https://vitalixonline-scale.github.io/teamflow-website"
 TZ = pytz.timezone("Europe/Zurich")
 
 TEAMS = ["Marketing Team", "Safe Offers Team", "ReSell Team", "Sales Team", "Warehouse Team"]
+
+# Daily revenue targets per brand
+BRAND_TARGETS = {
+    "VSmedic Italy": 5000,
+    "Vitalix Italy": 5000,
+}
+ROAS_MINIMUM = 3.5
 SUMMARY_TEAMS = ["Marketing Team", "ReSell Team", "Sales Team", "Warehouse Team"]
 
 MOTIVATIONS = [
@@ -906,6 +913,40 @@ async def meeting_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         reminder_msg = f"\n⏰ Reminder at *{remind_time.strftime('%H:%M')}*"
     await update.message.reply_text(f"✅ Meeting added!\n\n🕐 *{time_str}* — {title}{reminder_msg}", parse_mode="Markdown")
 
+async def targets_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Anyone can check daily brand targets"""
+    data = load()
+    uid = str(update.effective_user.id)
+    
+    # Get today's marketing KPIs to show progress
+    today_recap = {}
+    for uid_m, user in data["users"].items():
+        if user.get("team") == "Marketing Team":
+            stats = data.get("stats", {}).get(uid_m, {}).get(today(), {})
+            if stats.get("revenue"):
+                brand = stats.get("account", "General")
+                rev = stats.get("revenue", "0").replace("€","")
+                try:
+                    today_recap[brand] = float(rev)
+                except:
+                    pass
+    
+    lines = [f"🎯 *Daily ADS Targets — {today()}*
+"]
+    for brand, target in BRAND_TARGETS.items():
+        actual = today_recap.get(brand, 0)
+        pct = round(actual/target*100) if target > 0 else 0
+        bar = "█" * min(10, pct//10) + "░" * max(0, 10 - pct//10)
+        status = "✅" if pct >= 100 else "🔥" if pct >= 70 else "⚡" if pct >= 40 else "⏳"
+        lines.append(f"{status} *{brand}*")
+        lines.append(f"   Target: *{target:,}€*")
+        lines.append(f"   Today: *{actual:,.0f}€* ({pct}%)")
+        lines.append(f"   `{bar}`
+")
+    
+    await update.message.reply_text("
+".join(lines), parse_mode="Markdown")
+
 async def meetings_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     data = load()
     meetings = [m for m in data.get("meetings", []) if m.get("date") == today()]
@@ -933,6 +974,93 @@ async def button_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if team in DAILY_ROUTINES:
                 data["daily"][uid] = [{"text": r, "done_date": None} for r in DAILY_ROUTINES[team]]
             save(data)
+            # Set team-specific commands
+            if team == "Marketing Team":
+                cmds = [
+                    BotCommand("start","👋 Open TeamFlow"),
+                    BotCommand("clockin","▶️ Clock in"),
+                    BotCommand("clockout","■ Clock out"),
+                    BotCommand("status","📊 My status"),
+                    BotCommand("tasks","✅ My tasks"),
+                    BotCommand("addtask","➕ Add task"),
+                    BotCommand("daily","📋 Daily routines"),
+                    BotCommand("goals","🎯 Set daily goals"),
+                    BotCommand("report","📈 My report"),
+                    BotCommand("meetings","📅 Today's meetings"),
+                    BotCommand("targets","🎯 ADS targets"),
+                    BotCommand("recap","📢 Log marketing recap"),
+                    BotCommand("checklinks","🌐 Check landing pages"),
+                    BotCommand("adddomain","➕ Add domain"),
+                ]
+            elif team == "Safe Offers Team":
+                cmds = [
+                    BotCommand("start","👋 Open TeamFlow"),
+                    BotCommand("clockin","▶️ Clock in"),
+                    BotCommand("clockout","■ Clock out"),
+                    BotCommand("status","📊 My status"),
+                    BotCommand("tasks","✅ My tasks"),
+                    BotCommand("addtask","➕ Add task"),
+                    BotCommand("daily","📋 Daily routines"),
+                    BotCommand("goals","🎯 Set daily goals"),
+                    BotCommand("report","📈 My report"),
+                    BotCommand("meetings","📅 Today's meetings"),
+                    BotCommand("newoffer","🎯 New offer checklist"),
+                    BotCommand("checklinks","🌐 Check landing pages"),
+                    BotCommand("adddomain","➕ Add domain"),
+                ]
+            elif team == "ReSell Team":
+                cmds = [
+                    BotCommand("start","👋 Open TeamFlow"),
+                    BotCommand("clockin","▶️ Clock in"),
+                    BotCommand("clockout","■ Clock out"),
+                    BotCommand("status","📊 My status"),
+                    BotCommand("tasks","✅ My tasks"),
+                    BotCommand("addtask","➕ Add task"),
+                    BotCommand("daily","📋 Daily routines"),
+                    BotCommand("goals","🎯 Set daily goals"),
+                    BotCommand("report","📈 My report"),
+                    BotCommand("meetings","📅 Today's meetings"),
+                    BotCommand("resell","🔄 Log ReSell stats"),
+                ]
+            elif team == "Sales Team":
+                cmds = [
+                    BotCommand("start","👋 Open TeamFlow"),
+                    BotCommand("clockin","▶️ Clock in"),
+                    BotCommand("clockout","■ Clock out"),
+                    BotCommand("status","📊 My status"),
+                    BotCommand("tasks","✅ My tasks"),
+                    BotCommand("addtask","➕ Add task"),
+                    BotCommand("daily","📋 Daily routines"),
+                    BotCommand("goals","🎯 Set daily goals"),
+                    BotCommand("report","📈 My report"),
+                    BotCommand("meetings","📅 Today's meetings"),
+                    BotCommand("orders","💼 Log orders"),
+                    BotCommand("delivery","🚚 Log delivery rate"),
+                ]
+            elif team == "Warehouse Team":
+                cmds = [
+                    BotCommand("start","👋 Open TeamFlow"),
+                    BotCommand("clockin","▶️ Clock in"),
+                    BotCommand("clockout","■ Clock out"),
+                    BotCommand("status","📊 My status"),
+                    BotCommand("tasks","✅ My tasks"),
+                    BotCommand("addtask","➕ Add task"),
+                    BotCommand("daily","📋 Daily routines"),
+                    BotCommand("goals","🎯 Set daily goals"),
+                    BotCommand("report","📈 My report"),
+                    BotCommand("meetings","📅 Today's meetings"),
+                    BotCommand("shipped","📦 Log shipped"),
+                    BotCommand("stock","📦 Update stock"),
+                ]
+            else:
+                cmds = []
+            if cmds:
+                try:
+                    from telegram import BotCommandScopeChat
+                    await ctx.bot.set_my_commands(cmds, scope=BotCommandScopeChat(chat_id=int(uid)))
+                except Exception as e:
+                    logger.warning(f"Could not set commands: {e}")
+
             await query.edit_message_text(
                 f"✅ Team set to *{team}*!\n\n📋 Daily routines loaded automatically.\n\nType `/clockin` to start! 🚀",
                 parse_mode="Markdown"
@@ -1024,14 +1152,42 @@ async def job_morning_meetings(ctx: ContextTypes.DEFAULT_TYPE):
 async def job_clockin_reminder(ctx: ContextTypes.DEFAULT_TYPE):
     if not is_weekday(): return
     data = load()
+    
+    # Find who hasn't clocked in
+    not_clocked = []
     for uid, user in data["users"].items():
         if not user.get("clocked_in"):
             today_sessions = [s for s in data["sessions"].get(uid, []) if s["date"] == today()]
             if not today_sessions:
+                not_clocked.append(user["name"])
+                # Also send personal DM
                 try:
-                    await ctx.bot.send_message(chat_id=int(uid), text=f"⏰ Hey *{user['name']}*, you haven't clocked in yet!\n\nType `/clockin` to start. 💪", parse_mode="Markdown")
+                    await ctx.bot.send_message(
+                        chat_id=int(uid),
+                        text=f"⏰ Hey *{user['name']}*, you haven't clocked in yet!\n\nType `/clockin` to start. 💪",
+                        parse_mode="Markdown"
+                    )
                 except Exception as e:
                     logger.warning(f"DM error: {e}")
+    
+    # Post in group with bot button
+    if not_clocked:
+        keyboard = [[InlineKeyboardButton("▶️ Start Working", url="https://t.me/teamflow_scale_bot")]]
+        msg = (
+            f"⏰ *Good morning, team!*\n\n"
+            f"If you haven't clocked in yet — now is the time! 💪\n\n"
+            f"👇 Tap below to open the bot and start your workday!"
+        )
+        for gid in data.get("groups", []):
+            try:
+                await ctx.bot.send_message(
+                    chat_id=int(gid),
+                    text=msg,
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+            except Exception as e:
+                logger.warning(f"Group error: {e}")
 
 async def job_manager_late_alert(ctx: ContextTypes.DEFAULT_TYPE):
     if not is_weekday(): return
@@ -1106,12 +1262,39 @@ async def job_eod_personal_summary(ctx: ContextTypes.DEFAULT_TYPE):
 async def job_clockout_reminder(ctx: ContextTypes.DEFAULT_TYPE):
     if not is_weekday(): return
     data = load()
+    
+    still_in = []
     for uid, user in data["users"].items():
         if user.get("clocked_in"):
+            still_in.append(f"{user['name']} (since {user['clock_start']})")
+            # Personal DM
             try:
-                await ctx.bot.send_message(chat_id=int(uid), text=f"🔔 *{user['name']}*, still clocked in!\n\n🕐 Since: {user['clock_start']}\n\nType `/clockout`! 👋", parse_mode="Markdown")
+                await ctx.bot.send_message(
+                    chat_id=int(uid),
+                    text=f"🔔 *{user['name']}*, you're still clocked in!\n\n🕐 Since: {user['clock_start']}\n\nDon't forget to `/clockout`! 👋",
+                    parse_mode="Markdown"
+                )
             except Exception as e:
                 logger.warning(f"DM error: {e}")
+    
+    # Post in group if anyone still clocked in
+    if still_in:
+        keyboard = [[InlineKeyboardButton("■ Clock Out Now", url="https://t.me/teamflow_scale_bot")]]
+        msg = (
+            f"🔔 *End of Day Reminder!*\n\n"
+            f"If you're still working — don't forget to clock out! \n\n"
+            f"👇 Tap below to open the bot and log your hours."
+        )
+        for gid in data.get("groups", []):
+            try:
+                await ctx.bot.send_message(
+                    chat_id=int(gid),
+                    text=msg,
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+            except Exception as e:
+                logger.warning(f"Group error: {e}")
 
 async def job_manager_daily_digest(ctx: ContextTypes.DEFAULT_TYPE):
     if not is_weekday(): return
@@ -1240,6 +1423,8 @@ async def run():
     # Meetings
     app.add_handler(CommandHandler("meeting", meeting_cmd))
     app.add_handler(CommandHandler("meetings", meetings_today))
+    app.add_handler(CommandHandler("announce", announce_cmd))
+    app.add_handler(CommandHandler("targets", targets_cmd))
 
     # Manager
     app.add_handler(CommandHandler("manager", manager_login))
@@ -1270,8 +1455,112 @@ async def run():
     jq.run_daily(job_weekly_report_groups,    time=datetime.strptime("16:00", "%H:%M").replace(tzinfo=TZ).timetz(), days=(6,))
     jq.run_daily(job_warehouse_monday_reminder, time=datetime.strptime("15:30", "%H:%M").replace(tzinfo=TZ).timetz(), days=(0,))
 
+    from telegram import BotCommand, BotCommandScopeDefault, BotCommandScopeChat
+
+    # Default commands (for unregistered users)
+    default_commands = [
+        BotCommand("start", "👋 Welcome & open website"),
+        BotCommand("register", "📝 Register your account"),
+        BotCommand("manager", "🔐 Admin login"),
+    ]
+
+    # Member commands (general - all teams)
+    member_commands = [
+        BotCommand("start", "👋 Open TeamFlow"),
+        BotCommand("clockin", "▶️ Clock in"),
+        BotCommand("clockout", "■ Clock out"),
+        BotCommand("status", "📊 My status"),
+        BotCommand("tasks", "✅ My tasks"),
+        BotCommand("addtask", "➕ Add task"),
+        BotCommand("daily", "📋 Daily routines"),
+        BotCommand("goals", "🎯 Set daily goals"),
+        BotCommand("report", "📈 My weekly report"),
+        BotCommand("meetings", "📅 Today's meetings"),
+        BotCommand("targets", "🎯 ADS targets"),
+    ]
+
+    # Marketing Team extra commands
+    marketing_commands = member_commands + [
+        BotCommand("recap", "📢 Log marketing recap"),
+        BotCommand("checklinks", "🌐 Check landing pages"),
+        BotCommand("adddomain", "➕ Add domain"),
+    ]
+
+    # Safe Offers Team extra commands
+    safe_offers_commands = member_commands + [
+        BotCommand("newoffer", "🎯 New offer checklist"),
+        BotCommand("checklinks", "🌐 Check landing pages"),
+        BotCommand("adddomain", "➕ Add domain"),
+    ]
+
+    # ReSell Team extra commands
+    resell_commands = member_commands + [
+        BotCommand("resell", "🔄 Log ReSell stats"),
+    ]
+
+    # Sales Team extra commands
+    sales_commands = member_commands + [
+        BotCommand("orders", "💼 Log orders"),
+        BotCommand("delivery", "🚚 Log delivery rate"),
+    ]
+
+    # Warehouse Team extra commands
+    warehouse_commands = member_commands + [
+        BotCommand("shipped", "📦 Log shipped orders"),
+        BotCommand("stock", "📦 Update stock"),
+    ]
+
+    # Manager commands
+    manager_commands = [
+        BotCommand("start", "👋 Open TeamFlow"),
+        BotCommand("teamstatus", "👥 Team live status"),
+        BotCommand("teamreport", "📊 Weekly team report"),
+        BotCommand("timelog", "⏱ Time log"),
+        BotCommand("dailystats", "📈 Today's KPIs"),
+        BotCommand("meeting", "📅 Add meeting"),
+        BotCommand("meetings", "📅 Today's meetings"),
+        BotCommand("announce", "📣 Announce to group"),
+        BotCommand("listgroups", "🏢 Registered groups"),
+        BotCommand("targets", "🎯 ADS targets"),
+        BotCommand("clockin", "▶️ Clock in"),
+        BotCommand("clockout", "■ Clock out"),
+        BotCommand("status", "📊 My status"),
+        BotCommand("report", "📈 My report"),
+    ]
+
     print("✅ TeamFlow bot started with all scheduled jobs!")
     async with app:
+        # Set default commands
+        await app.bot.set_my_commands(default_commands, scope=BotCommandScopeDefault())
+
+        # Set per-user commands based on team
+        data = load()
+        for uid, user in data["users"].items():
+            team = user.get("team", "")
+            if team == "Marketing Team":
+                cmds = marketing_commands
+            elif team == "Safe Offers Team":
+                cmds = safe_offers_commands
+            elif team == "ReSell Team":
+                cmds = resell_commands
+            elif team == "Sales Team":
+                cmds = sales_commands
+            elif team == "Warehouse Team":
+                cmds = warehouse_commands
+            else:
+                cmds = member_commands
+            try:
+                await app.bot.set_my_commands(cmds, scope=BotCommandScopeChat(chat_id=int(uid)))
+            except Exception as e:
+                logger.warning(f"Could not set commands for {uid}: {e}")
+
+        # Set manager commands
+        for mgr_uid in data.get("managers", []):
+            try:
+                await app.bot.set_my_commands(manager_commands, scope=BotCommandScopeChat(chat_id=int(mgr_uid)))
+            except Exception as e:
+                logger.warning(f"Could not set manager commands for {mgr_uid}: {e}")
+
         await app.start()
         await app.updater.start_polling(drop_pending_updates=True)
         await asyncio.Event().wait()
