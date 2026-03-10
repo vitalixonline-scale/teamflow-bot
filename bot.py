@@ -931,8 +931,7 @@ async def targets_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 except:
                     pass
     
-    lines = [f"🎯 *Daily ADS Targets — {today()}*
-"]
+    lines = [f"🎯 *Daily ADS Targets — {today()}*\n"]
     for brand, target in BRAND_TARGETS.items():
         actual = today_recap.get(brand, 0)
         pct = round(actual/target*100) if target > 0 else 0
@@ -941,11 +940,11 @@ async def targets_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         lines.append(f"{status} *{brand}*")
         lines.append(f"   Target: *{target:,}€*")
         lines.append(f"   Today: *{actual:,.0f}€* ({pct}%)")
-        lines.append(f"   `{bar}`
-")
+        lines.append(f"   `{bar}`")
+
     
-    await update.message.reply_text("
-".join(lines), parse_mode="Markdown")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
 
 async def meetings_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     data = load()
