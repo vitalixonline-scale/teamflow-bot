@@ -40,14 +40,21 @@ SHEET_SCOPES = ["https://spreadsheets.google.com/feeds", "https://www.googleapis
 def get_sheet_client():
     """Get authenticated gspread client from env credentials"""
     if not GSPREAD_AVAILABLE:
+        logger.warning("gspread not available")
         return None
     try:
         creds_json = os.environ.get("GOOGLE_CREDENTIALS", "")
         if not creds_json:
+            logger.warning("GOOGLE_CREDENTIALS env var is empty")
             return None
         creds_dict = json.loads(creds_json)
         creds = Credentials.from_service_account_info(creds_dict, scopes=SHEET_SCOPES)
-        return gspread.authorize(creds)
+        client = gspread.authorize(creds)
+        logger.info("Google Sheets client created successfully")
+        return client
+    except json.JSONDecodeError as e:
+        logger.warning(f"GOOGLE_CREDENTIALS is not valid JSON: {e}")
+        return None
     except Exception as e:
         logger.warning(f"Google Sheets auth error: {e}")
         return None
@@ -994,12 +1001,20 @@ async def meeting_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def sheetreport_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Anyone can request sheet report: /sheetreport [brand]"""
     brand = " ".join(ctx.args) if ctx.args else "VSmedic"
-    await update.message.reply_text(f"📊 Reading sheet for *{brand}*...", parse_mode="Markdown")
+    await update.message.reply_text("📊 Reading sheet for *" + brand + "*...", parse_mode="Markdown")
+    # Debug: check if credentials exist
+    creds_json = os.environ.get("GOOGLE_CREDENTIALS", "")
+    if not creds_json:
+        await update.message.reply_text("❌ GOOGLE_CREDENTIALS not set in environment!", parse_mode="Markdown")
+        return
+    if not GSPREAD_AVAILABLE:
+        await update.message.reply_text("❌ gspread library not installed!", parse_mode="Markdown")
+        return
     data_sheet = get_today_sheet_data(brand)
     if not data_sheet:
         await update.message.reply_text(
         await update.message.reply_text(
-            f"Could not read sheet for *{brand}*. Check: Sheet shared with bot? API enabled?",
+            "❌ Could not read sheet for *" + brand + "*\n\nCheck:\n• Sheet shared with bot?\n• Google APIs enabled?",
             parse_mode="Markdown"
         )
         )
@@ -1662,4 +1677,10 @@ async def run():
         await asyncio.Event().wait()
 
 if __name__ == "__main__":
+    import requests
+    # Delete any existing webhook and drop pending updates to avoid conflicts
+    try:
+        requests.get(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook?drop_pending_updates=true")
+    except:
+        pass
     asyncio.run(run())
