@@ -231,9 +231,8 @@ async def register(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     data["todos"][uid] = []
     data["daily"][uid] = []
     save(data)
-    keyboard = [[InlineKeyboardButton(f"☐ {t}", callback_data=f"setteam_{t}")] for t in TEAMS]
-    keyboard.append([InlineKeyboardButton("✔️ Done", callback_data="setteam_done")])
-    await update.message.reply_text(f"✅ Welcome, *{name}*! 🎉\n\n🏷 Select your team(s) — you can pick multiple:\n(tap to select, tap ✔️ Done when finished)", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+    keyboard = [[InlineKeyboardButton(t, callback_data=f"setteam_{t}")] for t in TEAMS]
+    await update.message.reply_text(f"✅ Welcome, *{name}*! 🎉\n\n🏷 Select your team:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def clockin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     data = load()
@@ -929,38 +928,13 @@ async def button_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if query.data.startswith("setteam_"):
         team = query.data.replace("setteam_", "")
         if uid in data["users"]:
-            teams = data["users"][uid].get("teams", [])
-            if team in teams:
-                teams.remove(team)
-                action = "removed from"
-            else:
-                teams.append(team)
-                action = "added to"
-            data["users"][uid]["teams"] = teams
-            data["users"][uid]["team"] = teams[0] if teams else ""
-            # Auto-populate daily routines from first team
-            if teams and teams[0] in DAILY_ROUTINES:
-                data["daily"][uid] = [{"text": r, "done_date": None} for r in DAILY_ROUTINES[teams[0]]]
-            save(data)
-            selected = "\n".join([f"✅ {t}" for t in teams]) if teams else "No teams selected"
-            keyboard = [[InlineKeyboardButton(f"{'✅' if t in teams else '☐'} {t}", callback_data=f"setteam_{t}")] for t in TEAMS]
-            keyboard.append([InlineKeyboardButton("✔️ Done", callback_data="setteam_done")])
-            await query.edit_message_text(
-                f"🏷 *Team selection:*\n\n{selected}\n\nTap to add/remove teams:",
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-        return
-
-    if query.data == "setteam_done":
-        if uid in data["users"]:
-            teams = data["users"][uid].get("teams", [])
-            if not teams:
-                await query.edit_message_text("❌ Please select at least one team!", parse_mode="Markdown")
-                return
+            data["users"][uid]["team"] = team
+            data["users"][uid]["teams"] = [team]
+            if team in DAILY_ROUTINES:
+                data["daily"][uid] = [{"text": r, "done_date": None} for r in DAILY_ROUTINES[team]]
             save(data)
             await query.edit_message_text(
-                f"✅ *Teams set!*\n\n" + "\n".join([f"🏷 {t}" for t in teams]) + "\n\nType `/clockin` to start! 🚀",
+                f"✅ Team set to *{team}*!\n\n📋 Daily routines loaded automatically.\n\nType `/clockin` to start! 🚀",
                 parse_mode="Markdown"
             )
         return
