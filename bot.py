@@ -766,25 +766,237 @@ async def targets_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         lines.append(f"📊 *{brand}*: Target *{target:,}€/day*")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
+
+async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Show all available commands based on role"""
+    uid = str(update.effective_user.id)
+    data = load()
+    user = data["users"].get(uid, {})
+    team = user.get("team", "")
+
+    if is_manager(data, uid):
+        await update.message.reply_text(
+            "📋 *Manager — All Commands*\n\n"
+            "👥 *Team Management:*\n"
+            "`/teamstatus` — Live team status\n"
+            "`/teamreport` — Weekly report\n"
+            "`/timelog` — Today's time log\n"
+            "`/dailystats` — Today's KPIs\n\n"
+            "📅 *Meetings:*\n"
+            "`/meeting 14:00 Title | Team` — Add meeting\n"
+            "`/meetings` — Today's meetings\n\n"
+            "📣 *Announcements:*\n"
+            "`/announce Message` — All groups\n"
+            "`/announce @Marketing Msg` — Marketing only\n"
+            "`/announce @SafeOffers Msg` — Safe Offers only\n"
+            "`/announce @Sales Msg` — Sales only\n"
+            "`/announce @ReSell Msg` — ReSell only\n"
+            "`/announce @Warehouse Msg` — Warehouse only\n"
+            "`/announce @dm Msg` — DM all members\n"
+            "`/announce @Marketing @dm Msg` — Group + DM\n\n"
+            "🏢 *Groups:*\n"
+            "`/listgroups` — Registered groups\n"
+            "`/setup` — Register group (in group)\n"
+            "`/setgroupteam` — Assign team to group\n\n"
+            "🎯 *ADS:*\n"
+            "`/targets` — Daily brand targets\n\n"
+            "⏱ *Personal:*\n"
+            "`/clockin` · `/clockout` · `/status`\n"
+            "`/tasks` · `/daily` · `/report`",
+            parse_mode="Markdown"
+        )
+    elif team == "Marketing Team":
+        await update.message.reply_text(
+            "📋 *Marketing Team — Commands*\n\n"
+            "⏱ *Time:*\n"
+            "`/clockin` · `/clockout` · `/status`\n\n"
+            "✅ *Tasks & Routines:*\n"
+            "`/tasks` — My tasks\n"
+            "`/addtask [h/m/l] Task` — Add task\n"
+            "`/daily` — Daily routines\n"
+            "`/adddaily Task` — Add routine\n\n"
+            "📊 *KPIs:*\n"
+            "`/recap spend revenue roas account` — Log KPIs\n"
+            "`/targets` — Daily ADS targets\n\n"
+            "🌐 *Domains:*\n"
+            "`/checklinks` — Check all domains\n"
+            "`/adddomain Brand https://url` — Add domain\n\n"
+            "📅 *Other:*\n"
+            "`/meetings` — Today's meetings\n"
+            "`/goals Goal1 | Goal2` — Set daily goals\n"
+            "`/report` — Weekly report",
+            parse_mode="Markdown"
+        )
+    elif team == "Safe Offers Team":
+        await update.message.reply_text(
+            "📋 *Safe Offers — Commands*\n\n"
+            "⏱ *Time:*\n"
+            "`/clockin` · `/clockout` · `/status`\n\n"
+            "✅ *Tasks & Routines:*\n"
+            "`/tasks` · `/addtask` · `/daily` · `/adddaily`\n\n"
+            "🎯 *Offers:*\n"
+            "`/newoffer BrandName` — New offer checklist\n\n"
+            "🌐 *Domains:*\n"
+            "`/checklinks` — Check all domains\n"
+            "`/adddomain Brand https://url` — Add domain\n\n"
+            "📅 *Other:*\n"
+            "`/meetings` · `/goals` · `/report`",
+            parse_mode="Markdown"
+        )
+    elif team == "ReSell Team":
+        await update.message.reply_text(
+            "📋 *ReSell Team — Commands*\n\n"
+            "⏱ *Time:*\n"
+            "`/clockin` · `/clockout` · `/status`\n\n"
+            "✅ *Tasks & Routines:*\n"
+            "`/tasks` · `/addtask` · `/daily` · `/adddaily`\n\n"
+            "📊 *KPIs:*\n"
+            "`/resell contacted renewed revenue`\n"
+            "Example: `/resell 45 12 2400`\n\n"
+            "📅 *Other:*\n"
+            "`/meetings` · `/goals` · `/report`",
+            parse_mode="Markdown"
+        )
+    elif team == "Sales Team":
+        await update.message.reply_text(
+            "📋 *Sales Team — Commands*\n\n"
+            "⏱ *Time:*\n"
+            "`/clockin` · `/clockout` · `/status`\n\n"
+            "✅ *Tasks & Routines:*\n"
+            "`/tasks` · `/addtask` · `/daily` · `/adddaily`\n\n"
+            "📊 *KPIs:*\n"
+            "`/orders total confirmed rejected cod card`\n"
+            "Example: `/orders 45 38 7 25 13`\n"
+            "`/delivery rate` — Example: `/delivery 92`\n\n"
+            "📅 *Other:*\n"
+            "`/meetings` · `/goals` · `/report`",
+            parse_mode="Markdown"
+        )
+    elif team == "Warehouse Team":
+        await update.message.reply_text(
+            "📋 *Warehouse Team — Commands*\n\n"
+            "⏱ *Time:*\n"
+            "`/clockin` · `/clockout` · `/status`\n\n"
+            "✅ *Tasks & Routines:*\n"
+            "`/tasks` · `/addtask` · `/daily` · `/adddaily`\n\n"
+            "📦 *KPIs:*\n"
+            "`/shipped shipped returned unfulfilled`\n"
+            "Example: `/shipped 85 5 3`\n"
+            "`/stock` — View stock\n"
+            "`/stock Product 50` — Update stock\n\n"
+            "📅 *Other:*\n"
+            "`/meetings` · `/goals` · `/report`",
+            parse_mode="Markdown"
+        )
+    else:
+        await update.message.reply_text(
+            "📋 *Available Commands:*\n\n"
+            "`/register Your Name` — Register\n"
+            "`/clockin` · `/clockout` · `/status`\n"
+            "`/tasks` · `/daily` · `/report`\n"
+            "`/meetings` · `/goals`\n\n"
+            "Use `/manager PASSWORD` for admin access.",
+            parse_mode="Markdown"
+        )
+
 async def announce_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """
+    /announce Message — send to ALL groups
+    /announce @Marketing Message — send only to Marketing Team group
+    /announce @dm Message — send DM to all members
+    /announce @Marketing @dm Message — send to Marketing group + DM to Marketing members
+    """
     uid = str(update.effective_user.id)
     data = load()
     if not is_manager(data, uid):
         await update.message.reply_text("❌ Only managers can send announcements.", parse_mode="Markdown")
         return
     if not ctx.args:
-        await update.message.reply_text("Usage: `/announce Your message here`", parse_mode="Markdown")
+        await update.message.reply_text(
+            "📣 *Announce Commands:*\n\n"
+            "`/announce Message` — all groups\n"
+            "`/announce @Marketing Message` — Marketing group only\n"
+            "`/announce @SafeOffers Message` — Safe Offers group only\n"
+            "`/announce @ReSell Message` — ReSell group only\n"
+            "`/announce @Sales Message` — Sales group only\n"
+            "`/announce @Warehouse Message` — Warehouse group only\n"
+            "`/announce @dm Message` — DM to all members\n"
+            "`/announce @Marketing @dm Message` — group + DM to that team",
+            parse_mode="Markdown"
+        )
         return
-    message = " ".join(ctx.args)
-    msg = f"📣 *Announcement from Management*\n\n{message}"
-    sent = 0
-    for gid in data.get("groups", []):
+
+    # Team name shortcuts
+    TEAM_SHORTCUTS = {
+        "@marketing": "Marketing Team",
+        "@safeoffers": "Safe Offers Team",
+        "@safe": "Safe Offers Team",
+        "@resell": "ReSell Team",
+        "@sales": "Sales Team",
+        "@warehouse": "Warehouse Team",
+    }
+
+    # Parse args - extract @tags and message
+    target_team = None
+    send_dm = False
+    msg_parts = []
+    for arg in ctx.args:
+        if arg.lower() == "@dm":
+            send_dm = True
+        elif arg.lower() in TEAM_SHORTCUTS:
+            target_team = TEAM_SHORTCUTS[arg.lower()]
+        else:
+            msg_parts.append(arg)
+
+    if not msg_parts:
+        await update.message.reply_text("❌ Message cannot be empty.", parse_mode="Markdown")
+        return
+
+    message = " ".join(msg_parts)
+    team_label = target_team if target_team else "All Teams"
+    msg = f"📣 *Announcement* — _{team_label}_\n\n{message}"
+
+    sent_groups = 0
+    sent_dms = 0
+
+    # Send to groups
+    groups = data.get("groups", [])
+    if not groups and not send_dm:
+        await update.message.reply_text("❌ No groups registered yet.", parse_mode="Markdown")
+        return
+
+    for gid in groups:
+        # Filter by team if specified
+        group_team = data.get("group_teams", {}).get(gid, "ALL")
+        if target_team and group_team != "ALL" and group_team != target_team:
+            continue
         try:
             await ctx.bot.send_message(chat_id=int(gid), text=msg, parse_mode="Markdown")
-            sent += 1
+            sent_groups += 1
         except Exception as e:
             logger.warning(f"Group error: {e}")
-    await update.message.reply_text(f"✅ Sent to *{sent}* group(s)!", parse_mode="Markdown")
+
+    # Send DMs
+    if send_dm:
+        for member_uid, user in data["users"].items():
+            if target_team and user.get("team") != target_team:
+                continue
+            try:
+                dm_msg = f"📣 *Message from Management*\n\n{message}"
+                await ctx.bot.send_message(chat_id=int(member_uid), text=dm_msg, parse_mode="Markdown")
+                sent_dms += 1
+            except Exception as e:
+                logger.warning(f"DM error: {e}")
+
+    # Confirmation
+    parts = []
+    if sent_groups: parts.append(f"*{sent_groups}* group(s)")
+    if sent_dms: parts.append(f"*{sent_dms}* member DM(s)")
+    if not parts:
+        await update.message.reply_text("⚠️ No matching groups/members found.", parse_mode="Markdown")
+    else:
+        target_txt = f" → _{target_team}_" if target_team else ""
+        await update.message.reply_text(f"✅ Sent to {' + '.join(parts)}{target_txt}!", parse_mode="Markdown")
 
 async def list_groups(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
@@ -1128,6 +1340,7 @@ async def run():
     app.add_handler(CommandHandler("checklinks", checklinks_cmd))
     app.add_handler(CommandHandler("meeting", meeting_cmd))
     app.add_handler(CommandHandler("meetings", meetings_today))
+    app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("announce", announce_cmd))
     app.add_handler(CommandHandler("targets", targets_cmd))
     app.add_handler(CommandHandler("manager", manager_login))
@@ -1176,6 +1389,7 @@ async def run():
         BotCommand("meetings","📅 Today's meetings"), BotCommand("announce","📣 Announce"),
         BotCommand("listgroups","🏢 Groups"), BotCommand("targets","🎯 ADS targets"),
         BotCommand("clockin","▶️ Clock in"), BotCommand("clockout","■ Clock out"),
+        BotCommand("help","📋 All commands"),
     ]
 
     print("✅ TeamFlow bot starting...")
