@@ -110,21 +110,34 @@ def is_manager(data, uid):
 # ── START / REGISTER ───────────────────────────────────────────────────────
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("🌐 Open TeamFlow Website", url=WEBSITE_URL)]]
-    await update.message.reply_text(
-        "👋 Welcome to *TeamFlow Scale Bot!*\n\n"
-        "📝 To get started: `/register Your Name`\n\n"
-        "📋 *Member commands:*\n"
-        "/clockin /clockout /status\n"
-        "/tasks /addtask /daily /report\n\n"
-        "📊 *Team tracking:*\n"
-        "/recap — Marketing KPIs\n"
-        "/orders — Sales orders\n"
-        "/resell — ReSell stats\n"
-        "/shipped — Warehouse\n\n"
-        "Or open the website to use the full dashboard 👇",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    data = load()
+    uid = str(update.effective_user.id)
+    if uid in data["users"]:
+        user = data["users"][uid]
+        today_sec = get_today_sec(data, uid)
+        daily_list = data["daily"].get(uid, [])
+        daily_done = sum(1 for d in daily_list if d.get("done_date") == today())
+        status_icon = "🟢 Online" if user.get("clocked_in") else "🔴 Offline"
+        await update.message.reply_text(
+            f"👋 Welcome back, *{user['name']}*!\n"
+            f"🏷 {user.get('team','—')} | {status_icon}\n\n"
+            f"📋 Daily: *{daily_done}/{len(daily_list)}* routines done\n"
+            f"⏱ Today: *{fmt_dur(today_sec)}* worked\n\n"
+            f"*Quick commands:*\n"
+            f"/clockin · /clockout · /status\n"
+            f"/tasks · /daily · /report\n\n"
+            f"📱 Full dashboard 👇",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    else:
+        await update.message.reply_text(
+            "👋 Welcome to *TeamFlow Scale Bot!*\n\n"
+            "📝 To get started:\n`/register Your Name`\n\n"
+            "📱 Or open the full dashboard 👇",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
 async def register(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
@@ -552,11 +565,13 @@ async def newoffer_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     key = f"{brand}_{today()}"
     data["offers"][key] = {"brand": brand, "date": today(), "checklist": [False] * len(OFFER_CHECKLIST)}
     save(data)
+    # Use safe key without special chars for callback
+    safe_key = key.replace(" ", "-")
     lines = [f"🎯 *New Offer Checklist — {brand}*\n"]
     keyboard = []
     for i, item in enumerate(OFFER_CHECKLIST):
         lines.append(f"⬜ {i+1}. {item}")
-        keyboard.append([InlineKeyboardButton(f"✓ {item[:35]}", callback_data=f"offer_{brand}_{today()}_{i}")])
+        keyboard.append([InlineKeyboardButton(f"✓ {item[:35]}", callback_data=f"ofr_{safe_key}_{i}")])
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def adddomain_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -846,21 +861,27 @@ async def button_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"✅ Group assigned to *{team}*!", parse_mode="Markdown")
         return
 
-    if query.data.startswith("offer_"):
-        parts = query.data.split("_", 3)
-        if len(parts) >= 4:
-            brand_date_key = parts[1] + "_" + parts[2]
-            idx = int(parts[3])
-            offers = data.get("offers", {})
-            if brand_date_key in offers:
-                offers[brand_date_key]["checklist"][idx] = not offers[brand_date_key]["checklist"][idx]
-                save(data)
-                done = sum(offers[brand_date_key]["checklist"])
-                total = len(offers[brand_date_key]["checklist"])
-                if done == total:
-                    await query.edit_message_text(f"🎉 *Offer Ready!* — {offers[brand_date_key]['brand']}\n\n✅ All {total} steps completed!\n\nNotify Marketing Team to start campaigns! 🚀", parse_mode="Markdown")
-                else:
-                    await query.answer(f"✅ {done}/{total} steps done")
+    if query.data.startswith("ofr_"):
+        # Format: ofr_BrandName-Date_idx
+        parts = query.data.split("_")
+        idx = int(parts[-1])
+        safe_key = "_".join(parts[1:-1])
+        # Find matching offer key
+        offers = data.get("offers", {})
+        real_key = None
+        for k in offers:
+            if k.replace(" ", "-") == safe_key:
+                real_key = k
+                break
+        if real_key and real_key in offers:
+            offers[real_key]["checklist"][idx] = not offers[real_key]["checklist"][idx]
+            save(data)
+            done = sum(offers[real_key]["checklist"])
+            total = len(offers[real_key]["checklist"])
+            if done == total:
+                await query.edit_message_text(f"🎉 *Offer Ready!* — {offers[real_key]['brand']}\n\n✅ All {total} steps completed!\n\nNotify Marketing Team! 🚀", parse_mode="Markdown")
+            else:
+                await query.answer(f"✅ {done}/{total} steps done")
         return
 
     if query.data.startswith("toggle_"):
