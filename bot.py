@@ -30,8 +30,9 @@ TEAMS = ["Marketing Team", "Safe Offers Team", "ReSell Team", "Sales Team", "War
 
 # Daily revenue targets per brand
 BRAND_TARGETS = {
-    "VSmedic Italy": 5000,
-    "Vitalix Italy": 5000,
+    "VSmedic": 5000,
+    "Vitalix IT": 5000,
+    "Vitalix EU": 0,
 }
 ROAS_MINIMUM = 3.5
 SHEET_ID = "1t196V5wuL857hVPKTZPvjr3RWOPf3dc1ncYZI5jJGZo"
@@ -998,6 +999,61 @@ async def meeting_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Meeting added!\n\n🕐 *{time_str}* — {title}{reminder_msg}", parse_mode="Markdown")
 
 
+
+async def debugsheet_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Debug Google Sheets connection step by step"""
+    lines = ["🔍 *Sheet Debug Report*\n"]
+    
+    # Step 1: Check gspread
+    lines.append("1️⃣ gspread installed: " + ("✅" if GSPREAD_AVAILABLE else "❌"))
+    
+    # Step 2: Check credentials
+    creds_json = os.environ.get("GOOGLE_CREDENTIALS", "")
+    lines.append("2️⃣ GOOGLE_CREDENTIALS set: " + ("✅" if creds_json else "❌ EMPTY"))
+    
+    if creds_json:
+        # Step 3: Parse JSON
+        try:
+            creds_dict = json.loads(creds_json)
+            lines.append("3️⃣ JSON valid: ✅")
+            lines.append("   client_email: " + creds_dict.get("client_email", "MISSING"))
+            lines.append("   project_id: " + creds_dict.get("project_id", "MISSING"))
+        except Exception as e:
+            lines.append("3️⃣ JSON parse error: ❌ " + str(e))
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+            return
+        
+        # Step 4: Auth
+        try:
+            from google.oauth2.service_account import Credentials as GCreds
+            creds = GCreds.from_service_account_info(creds_dict, scopes=SHEET_SCOPES)
+            lines.append("4️⃣ Auth credentials: ✅")
+        except Exception as e:
+            lines.append("4️⃣ Auth error: ❌ " + str(e))
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+            return
+        
+        # Step 5: Connect to gspread
+        try:
+            import gspread as gs
+            client = gs.authorize(creds)
+            lines.append("5️⃣ gspread connect: ✅")
+        except Exception as e:
+            lines.append("5️⃣ gspread error: ❌ " + str(e))
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+            return
+        
+        # Step 6: Open sheet
+        try:
+            sh = client.open_by_key(SHEET_ID)
+            lines.append("6️⃣ Open sheet: ✅")
+            worksheets = [ws.title for ws in sh.worksheets()]
+            lines.append("   Tabs found: " + ", ".join(worksheets))
+        except Exception as e:
+            lines.append("6️⃣ Open sheet error: ❌ " + str(e))
+    
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
 async def sheetreport_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Anyone can request sheet report: /sheetreport [brand]"""
     brand = " ".join(ctx.args) if ctx.args else "VSmedic"
@@ -1534,6 +1590,7 @@ async def run():
     app.add_handler(CommandHandler("meetings", meetings_today))
     app.add_handler(CommandHandler("announce", announce_cmd))
     app.add_handler(CommandHandler("sheetreport", sheetreport_cmd))
+    app.add_handler(CommandHandler("debugsheet", debugsheet_cmd))
     app.add_handler(CommandHandler("targets", targets_cmd))
 
     # Manager
