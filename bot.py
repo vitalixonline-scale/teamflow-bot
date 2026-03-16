@@ -49,6 +49,9 @@ TZ = pytz.timezone(os.getenv("TIMEZONE", "Europe/Rome"))
 # Polling interval for Notion Outbox (seconds)
 OUTBOX_POLL_INTERVAL = int(os.getenv("OUTBOX_POLL_INTERVAL", "60"))
 
+# Authorized admin usernames (can use /setup, /force_brief, /outbox)
+OWNER_USERNAMES = {"marcus_agent", "mate_marsic"}
+
 # Morning brief time (hour, minute)
 MORNING_BRIEF_HOUR = int(os.getenv("MORNING_BRIEF_HOUR", "9"))
 MORNING_BRIEF_MINUTE = int(os.getenv("MORNING_BRIEF_MINUTE", "5"))
@@ -539,8 +542,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_setup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Setup command for Marcus to register group chat IDs"""
     user = update.effective_user
-    if user.username != "marcus_agent":
-        await update.message.reply_text("⛔ Only Marcus can use /setup")
+    if user.username not in OWNER_USERNAMES:
+        await update.message.reply_text("⛔ Only authorized admins can use /setup")
         return
 
     chat = update.effective_chat
@@ -646,8 +649,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_force_brief(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Force send morning brief (admin only)"""
     user = update.effective_user
-    if user.username != "marcus_agent":
-        await update.message.reply_text("⛔ Only Marcus can use /force_brief")
+    if user.username not in OWNER_USERNAMES:
+        await update.message.reply_text("⛔ Only authorized admins can use /force_brief")
         return
 
     await update.message.reply_text("📋 Forcing morning brief delivery...")
@@ -658,8 +661,8 @@ async def cmd_force_brief(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_outbox(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Check Outbox status (admin only)"""
     user = update.effective_user
-    if user.username != "marcus_agent":
-        await update.message.reply_text("⛔ Only Marcus can use /outbox")
+    if user.username not in OWNER_USERNAMES:
+        await update.message.reply_text("⛔ Only authorized admins can use /outbox")
         return
 
     try:
