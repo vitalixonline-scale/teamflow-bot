@@ -1,1420 +1,803 @@
+"""
+TeamFlow Telegram Bot v2.0
+100% Notion-integrated — No website functionality
+Reads from Notion Telegram Outbox, sends to Telegram groups and DMs
+Works with Omni Sight and Stratex AI agents
+"""
+
 import os
-import json
 import logging
 import asyncio
-import aiohttp
-import requests
+import json
 from datetime import datetime, timedelta
+from typing import Optional, Dict, List
+
 import pytz
-import random
+from telegram import Update, Bot
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
+from telegram.constants import ParseMode
+import aiohttp
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, BotCommandScopeDefault, BotCommandScopeChat
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# CONFIGURATION
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Telegram Bot Token (from @BotFather)
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# ── CONFIG ─────────────────────────────────────────────────────────────────
-TOKEN = os.environ.get("BOT_TOKEN", "8774731842:AAHHHaVy-X3LFYFQa-kRWBBcrkiSzb23NVw")
-MANAGER_PASSWORD = os.environ.get("MANAGER_PASSWORD", "admin1234")
-DATA_FILE = "data.json"
-WEBSITE_URL = "https://vitalixonline-scale.github.io/teamflow-website"
-TZ = pytz.timezone("Europe/Zurich")
+# Notion API
+NOTION_API_KEY = os.getenv("NOTION_API_KEY")
+NOTION_VERSION = "2022-06-28"
 
-TEAMS = ["Marketing Team", "Safe Offers Team", "ReSell Team", "Sales Team", "Warehouse Team"]
-BRAND_TARGETS = {"VSmedic": 5000, "Vitalix IT": 5000, "Vitalix EU": 0}
-ROAS_MINIMUM = 3.5
+# Notion Page IDs (from your workspace)
+TELEGRAM_OUTBOX_PAGE_ID = os.getenv("TELEGRAM_OUTBOX_PAGE_ID", "32541c0c-6404-8162-971f-f78b9609f2aa")
+AI_SUGGESTIONS_PAGE_ID = os.getenv("AI_SUGGESTIONS_PAGE_ID", "32441c0c-6404-81b5-bc39-d5b2711cbfe9")
 
-DAILY_ROUTINES = {
-    "Marketing Team": ["Ad account health check","Budget check per ad account","Website/landing page check","Launch campaigns on META","Create new creatives","Identify winning ads (best ROAS)","Scaling check","Morning recap (spend, revenue, ROAS)","Daily targets check per brand","Pixel firing check","Keitaro stats check","Backup domain check"],
-    "Safe Offers Team": ["White Page setup & test","Cloaking setup & test","Offer Page check","Domain health check (SSL)","Pixel firing check","Keitaro stats check","IP/Bot filter check","Facebook Policy check","Backup domain check","Update domain table","New offer checklist"],
-    "ReSell Team": ["Review contact list","Check hold orders","Follow-up callbacks","Contact existing customers","Update customer status","Track daily renewal targets","Daily recap"],
-    "Sales Team": ["Review new orders","Contact customers on WhatsApp","Confirm payment (COD or Card)","Approve or reject orders","Check hold orders","EOD recap"],
-    "Warehouse Team": ["Receive approved orders","Print shipping labels","Pack orders","Check low stock items","EOD inventory update","Log returned orders","Report unfulfilled orders"],
+# Telegram Group Chat IDs (set via /setup command or env vars)
+ADMIN_GROUP_ID = os.getenv("ADMIN_GROUP_ID")  # Team Leaders group — ALL hub leaders see business overview
+SAFE_OFFERS_GROUP_ID = os.getenv("SAFE_OFFERS_GROUP_ID")  # Safe Offers team group
+
+# Timezone
+TZ = pytz.timezone(os.getenv("TIMEZONE", "Europe/Rome"))
+
+# Polling interval for Notion Outbox (seconds)
+OUTBOX_POLL_INTERVAL = int(os.getenv("OUTBOX_POLL_INTERVAL", "60"))
+
+# Morning brief time (hour, minute)
+MORNING_BRIEF_HOUR = int(os.getenv("MORNING_BRIEF_HOUR", "9"))
+MORNING_BRIEF_MINUTE = int(os.getenv("MORNING_BRIEF_MINUTE", "5"))
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# TEAM DIRECTORY (Telegram handles → chat IDs)
+# Chat IDs are populated automatically when team members /start the bot
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+TEAM_HANDLES = {
+    "marcus_agent": {"name": "Marcus", "department": ["Marketing", "Administration"], "chat_id": None},
+    "nikonbelas": {"name": "Niko", "department": ["Marketing", "Safe Offers"], "chat_id": None},
+    "ogiiiiz11": {"name": "Orhan", "department": ["Sales", "Resell"], "chat_id": None},
+    "ognjen_89": {"name": "Ognjen", "department": ["Warehouse"], "chat_id": None},
+    "lukawolk": {"name": "Luka", "department": ["Safe Offers", "Marketing"], "chat_id": None},
+    "cb9999999999": {"name": "Dušan", "department": ["Safe Offers"], "chat_id": None},
+    "jomlamladen": {"name": "Mladen", "department": ["Administration"], "chat_id": None},
 }
 
-OFFER_CHECKLIST = [
-    "White Page created & tested", "Cloaking configured in Keitaro", "Offer Page ready",
-    "Domain health check passed (SSL)", "Pixel firing correctly", "UTM parameters set",
-    "IP/Bot filters active", "Facebook Policy compliant", "Backup domain ready",
-    "Landing page speed OK", "Domain table updated", "Marketing Team notified"
-]
+# File to persist chat IDs between restarts
+CHAT_IDS_FILE = "chat_ids.json"
 
-MOTIVATIONS = [
-    "🔥 *Today is your day — make it count!*",
-    "💪 *Champions show up every day. Be a champion!*",
-    "🚀 *Small actions daily = big results monthly!*",
-    "⚡ *Your competition is working right now. Are you?*",
-    "🎯 *Focus. Execute. Win. That's the formula!*",
-]
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# LOGGING
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-SUMMARY_QUESTIONS = {
-    "Marketing Team": "📊 *Marketing Team — Daily Update*\n\n💰 Spend today?\n📈 Revenue today?\n📊 ROAS?\n🎯 Best performing ad?",
-    "Safe Offers Team": "🛡️ *Safe Offers — Daily Update*\n\n🌐 Domains checked?\n🔗 New offers live?\n⚠️ Any issues?",
-    "ReSell Team": "🔄 *ReSell Team — Daily Update*\n\n📞 Contacts made?\n✅ Renewals today?\n💰 Revenue?",
-    "Sales Team": "💼 *Sales Team — Daily Update*\n\n📦 Orders total?\n✅ Confirmed?\n❌ Rejected?\n🚚 Delivery rate?",
-    "Warehouse Team": "📦 *Warehouse — Daily Update*\n\n📦 Shipped today?\n↩️ Returns?\n⚠️ Low stock items?",
-}
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger("TeamFlowBot")
 
-# ── DATA ───────────────────────────────────────────────────────────────────
-def load():
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# CHAT ID PERSISTENCE
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def load_chat_ids():
+    """Load saved chat IDs from file"""
+    global TEAM_HANDLES
     try:
-        if os.path.exists(DATA_FILE):
-            with open(DATA_FILE, "r") as f:
-                data = json.load(f)
-        else:
-            data = {}
-    except:
-        data = {}
-    data.setdefault("users", {})
-    data.setdefault("sessions", {})
-    data.setdefault("todos", {})
-    data.setdefault("daily", {})
-    data.setdefault("stats", {})
-    data.setdefault("meetings", [])
-    data.setdefault("groups", [])
-    data.setdefault("managers", [])
-    data.setdefault("domains", [])
-    data.setdefault("offers", {})
-    data.setdefault("stock", {})
-    data.setdefault("group_teams", {})
-    return data
+        if os.path.exists(CHAT_IDS_FILE):
+            with open(CHAT_IDS_FILE, "r") as f:
+                saved = json.load(f)
+                for handle, chat_id in saved.items():
+                    if handle in TEAM_HANDLES:
+                        TEAM_HANDLES[handle]["chat_id"] = chat_id
+                logger.info(f"Loaded {len(saved)} chat IDs from file")
+    except Exception as e:
+        logger.error(f"Error loading chat IDs: {e}")
 
-def save(data):
-    with open(DATA_FILE, "w") as f:
-        json.dump(data, f, indent=2)
 
-def today():
-    return datetime.now(TZ).strftime("%Y-%m-%d")
-
-def now_zurich():
-    return datetime.now(TZ)
-
-def is_weekday():
-    return now_zurich().weekday() < 5
-
-def fmt_dur(seconds):
-    h = seconds // 3600
-    m = (seconds % 3600) // 60
-    return f"{h}h {m}m"
-
-def fmt_time(ts):
-    return datetime.fromtimestamp(ts, TZ).strftime("%H:%M")
-
-def get_today_sec(data, uid):
-    return sum(s.get("duration_sec", 0) for s in data["sessions"].get(uid, []) if s.get("date") == today())
-
-def is_manager(data, uid):
-    return uid in data.get("managers", [])
-
-# ── START / REGISTER ───────────────────────────────────────────────────────
-async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[InlineKeyboardButton("🌐 Open TeamFlow Website", url=WEBSITE_URL)]]
-    data = load()
-    uid = str(update.effective_user.id)
-    if uid in data["users"]:
-        user = data["users"][uid]
-        today_sec = get_today_sec(data, uid)
-        daily_list = data["daily"].get(uid, [])
-        daily_done = sum(1 for d in daily_list if d.get("done_date") == today())
-        status_icon = "🟢 Online" if user.get("clocked_in") else "🔴 Offline"
-        await update.message.reply_text(
-            f"👋 Welcome back, *{user['name']}*!\n"
-            f"🏷 {user.get('team','—')} | {status_icon}\n\n"
-            f"📋 Daily: *{daily_done}/{len(daily_list)}* routines done\n"
-            f"⏱ Today: *{fmt_dur(today_sec)}* worked\n\n"
-            f"*Quick commands:*\n"
-            f"/clockin · /clockout · /status\n"
-            f"/tasks · /daily · /report\n\n"
-            f"📱 Full dashboard 👇",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-    else:
-        await update.message.reply_text(
-            "👋 Welcome to *TeamFlow Scale Bot!*\n\n"
-            "📝 To get started:\n`/register Your Name`\n\n"
-            "📱 Or open the full dashboard 👇",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
-async def register(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = str(update.effective_user.id)
-    name = " ".join(ctx.args) if ctx.args else update.effective_user.first_name
-    data = load()
-    if uid in data["users"]:
-        user = data["users"][uid]
-        await update.message.reply_text(
-            f"✅ Already registered as *{user['name']}* — {user.get('team','no team')}!\n\n"
-            f"Use `/status` to see your info.",
-            parse_mode="Markdown"
-        )
-        return
-    data["users"][uid] = {"name": name, "team": "", "clocked_in": False, "clock_start": None, "goals": [], "goals_date": ""}
-    save(data)
-    keyboard = [[InlineKeyboardButton(t, callback_data=f"setteam_{t}")] for t in TEAMS]
-    await update.message.reply_text(
-        f"👋 Welcome *{name}*!\n\nChoose your team:",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-# ── CLOCK ──────────────────────────────────────────────────────────────────
-async def clockin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = str(update.effective_user.id)
-    data = load()
-    if uid not in data["users"]:
-        await update.message.reply_text("❌ Not registered. Use `/register Your Name`", parse_mode="Markdown")
-        return
-    user = data["users"][uid]
-    if user.get("clocked_in"):
-        since = user.get("clock_start_fmt", "unknown")
-        await update.message.reply_text(f"⚠️ Already clocked in since *{since}*!", parse_mode="Markdown")
-        return
-    ts = datetime.now(TZ).timestamp()
-    user["clocked_in"] = True
-    user["clock_start"] = ts
-    user["clock_start_fmt"] = fmt_time(ts)
-    save(data)
-    await update.message.reply_text(
-        f"✅ *{user['name']}* clocked in at *{fmt_time(ts)}* 🟢\n\n"
-        f"🏷 Team: {user.get('team','—')}\n"
-        f"Have a productive day! 💪",
-        parse_mode="Markdown"
-    )
-
-async def clockout(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = str(update.effective_user.id)
-    data = load()
-    if uid not in data["users"]:
-        await update.message.reply_text("❌ Not registered. Use `/register Your Name`", parse_mode="Markdown")
-        return
-    user = data["users"][uid]
-    if not user.get("clocked_in"):
-        await update.message.reply_text("⚠️ Not clocked in!", parse_mode="Markdown")
-        return
-    end_ts = datetime.now(TZ).timestamp()
-    start_ts = user.get("clock_start", end_ts)
-    duration_sec = int(end_ts - start_ts)
-    session = {"date": today(), "start": start_ts, "end": end_ts, "duration_sec": duration_sec, "member": user["name"], "team": user.get("team", "")}
-    data["sessions"].setdefault(uid, []).append(session)
-    user["clocked_in"] = False
-    user["clock_start"] = None
-    save(data)
-    today_sec = get_today_sec(data, uid)
-    await update.message.reply_text(
-        f"🔴 *{user['name']}* clocked out at *{fmt_time(end_ts)}*\n\n"
-        f"⏱ Session: *{fmt_dur(duration_sec)}*\n"
-        f"📅 Today total: *{fmt_dur(today_sec)}*\n\n"
-        f"Good work! See you tomorrow 👋",
-        parse_mode="Markdown"
-    )
-
-async def status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = str(update.effective_user.id)
-    data = load()
-    if uid not in data["users"]:
-        await update.message.reply_text("❌ Not registered. Use `/register Your Name`", parse_mode="Markdown")
-        return
-    user = data["users"][uid]
-    today_sec = get_today_sec(data, uid)
-    todos = data["todos"].get(uid, [])
-    done_tasks = sum(1 for t in todos if t.get("done"))
-    daily_list = data["daily"].get(uid, [])
-    daily_done = sum(1 for d in daily_list if d.get("done_date") == today())
-    status_icon = "🟢 Online" if user.get("clocked_in") else "🔴 Offline"
-    clock_info = f"Since {user.get('clock_start_fmt','—')}" if user.get("clocked_in") else f"Total today: {fmt_dur(today_sec)}"
-    await update.message.reply_text(
-        f"📊 *{user['name']}* — {user.get('team','—')}\n\n"
-        f"{status_icon}\n"
-        f"⏱ {clock_info}\n"
-        f"✅ Tasks: {done_tasks}/{len(todos)}\n"
-        f"📋 Daily: {daily_done}/{len(daily_list)}",
-        parse_mode="Markdown"
-    )
-
-# ── TASKS ──────────────────────────────────────────────────────────────────
-async def tasks(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = str(update.effective_user.id)
-    data = load()
-    if uid not in data["users"]:
-        await update.message.reply_text("❌ Not registered.", parse_mode="Markdown")
-        return
-    todos = data["todos"].get(uid, [])
-    if not todos:
-        await update.message.reply_text("📋 No tasks yet!\n\nAdd one: `/addtask Buy milk`", parse_mode="Markdown")
-        return
-    pri_icon = {"h": "🔴", "m": "🟡", "l": "🟢"}
-    lines = ["📋 *Your Tasks:*\n"]
-    keyboard = []
-    for i, t in enumerate(todos):
-        icon = "✅" if t.get("done") else pri_icon.get(t.get("pri","m"), "⬜")
-        lines.append(f"{icon} {t['text']}")
-        keyboard.append([InlineKeyboardButton(f"{'Undo' if t.get('done') else 'Done'}: {t['text'][:25]}", callback_data=f"toggle_{i}")])
-    keyboard.append([InlineKeyboardButton("🗑 Clear completed", callback_data="delete_done")])
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def addtask(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = str(update.effective_user.id)
-    data = load()
-    if uid not in data["users"]:
-        await update.message.reply_text("❌ Not registered.", parse_mode="Markdown")
-        return
-    if not ctx.args:
-        await update.message.reply_text("Usage: `/addtask [h/m/l] Task description`\n\nExample: `/addtask h Call client`", parse_mode="Markdown")
-        return
-    pri = "m"
-    text_parts = ctx.args
-    if ctx.args[0].lower() in ["h","m","l"]:
-        pri = ctx.args[0].lower()
-        text_parts = ctx.args[1:]
-    text = " ".join(text_parts)
-    if not text:
-        await update.message.reply_text("❌ Task text cannot be empty.", parse_mode="Markdown")
-        return
-    data["todos"].setdefault(uid, []).append({"text": text, "pri": pri, "done": False})
-    save(data)
-    pri_label = {"h":"🔴 High","m":"🟡 Medium","l":"🟢 Low"}
-    await update.message.reply_text(f"✅ Task added: *{text}*\nPriority: {pri_label[pri]}", parse_mode="Markdown")
-
-# ── DAILY ──────────────────────────────────────────────────────────────────
-async def daily(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = str(update.effective_user.id)
-    data = load()
-    if uid not in data["users"]:
-        await update.message.reply_text("❌ Not registered.", parse_mode="Markdown")
-        return
-    daily_list = data["daily"].get(uid, [])
-    if not daily_list:
-        await update.message.reply_text("📋 No daily routines!\n\nUse `/adddaily Task name` to add.", parse_mode="Markdown")
-        return
-    done = sum(1 for d in daily_list if d.get("done_date") == today())
-    pct = round(done/len(daily_list)*100)
-    bar = "█" * (pct//10) + "░" * (10 - pct//10)
-    lines = [f"📋 *Daily Routines — {today()}*\n`{bar}` {pct}%\n"]
-    keyboard = []
-    for i, d in enumerate(daily_list):
-        done_today = d.get("done_date") == today()
-        icon = "✅" if done_today else "⬜"
-        lines.append(f"{icon} {d['text']}")
-        keyboard.append([InlineKeyboardButton(f"{'Undo' if done_today else '✓'}: {d['text'][:30]}", callback_data=f"daily_{i}")])
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def adddaily(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = str(update.effective_user.id)
-    data = load()
-    if uid not in data["users"] or not ctx.args:
-        await update.message.reply_text("Usage: `/adddaily Task name`", parse_mode="Markdown")
-        return
-    text = " ".join(ctx.args)
-    data["daily"].setdefault(uid, []).append({"text": text, "done_date": None})
-    save(data)
-    await update.message.reply_text(f"✅ Added to daily: *{text}*", parse_mode="Markdown")
-
-# ── GOALS / REPORT ─────────────────────────────────────────────────────────
-async def goals_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = str(update.effective_user.id)
-    data = load()
-    if uid not in data["users"]:
-        await update.message.reply_text("❌ Not registered.", parse_mode="Markdown")
-        return
-    user = data["users"][uid]
-    if not ctx.args:
-        goals = user.get("goals", []) if user.get("goals_date") == today() else []
-        if not goals:
-            await update.message.reply_text("🎯 No goals set today.\n\nSet goals: `/goals Goal 1 | Goal 2`", parse_mode="Markdown")
-        else:
-            lines = ["🎯 *Today's Goals:*\n"] + [f"• {g}" for g in goals]
-            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-        return
-    goals_text = " ".join(ctx.args)
-    goals = [g.strip() for g in goals_text.split("|") if g.strip()]
-    user["goals"] = goals
-    user["goals_date"] = today()
-    save(data)
-    lines = ["🎯 *Goals set for today:*\n"] + [f"• {g}" for g in goals]
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-
-async def report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = str(update.effective_user.id)
-    data = load()
-    if uid not in data["users"]:
-        await update.message.reply_text("❌ Not registered.", parse_mode="Markdown")
-        return
-    user = data["users"][uid]
-    week_ago = (now_zurich() - timedelta(days=7)).strftime("%Y-%m-%d")
-    week_sec = sum(s.get("duration_sec",0) for s in data["sessions"].get(uid,[]) if s.get("date","") >= week_ago)
-    todos = data["todos"].get(uid, [])
-    done = sum(1 for t in todos if t.get("done"))
-    daily_list = data["daily"].get(uid, [])
-    daily_done = sum(1 for d in daily_list if d.get("done_date") == today())
-    await update.message.reply_text(
-        f"📈 *Weekly Report — {user['name']}*\n"
-        f"🏷 {user.get('team','—')}\n\n"
-        f"⏱ Hours (7 days): *{fmt_dur(week_sec)}*\n"
-        f"✅ Tasks: *{done}/{len(todos)}*\n"
-        f"📋 Daily today: *{daily_done}/{len(daily_list)}*",
-        parse_mode="Markdown"
-    )
-
-# ── TEAM KPIs ──────────────────────────────────────────────────────────────
-async def recap_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Marketing: /recap spend revenue roas account"""
-    uid = str(update.effective_user.id)
-    data = load()
-    if uid not in data["users"]:
-        await update.message.reply_text("❌ Not registered.", parse_mode="Markdown")
-        return
-    if not ctx.args or len(ctx.args) < 3:
-        await update.message.reply_text(
-            "📊 *Marketing Recap*\n\nUsage: `/recap spend revenue roas account`\n\nExample: `/recap 500 2000 4.0 VSmedic`",
-            parse_mode="Markdown"
-        )
-        return
+def save_chat_ids():
+    """Save current chat IDs to file"""
     try:
-        spend = float(ctx.args[0])
-        revenue = float(ctx.args[1])
-        roas = float(ctx.args[2])
-        account = ctx.args[3] if len(ctx.args) > 3 else "General"
-    except ValueError:
-        await update.message.reply_text("❌ Invalid numbers. Example: `/recap 500 2000 4.0 VSmedic`", parse_mode="Markdown")
-        return
-    data["stats"].setdefault(uid, {}).setdefault(today(), {}).update({"spend": f"{spend:.0f}€", "revenue": f"{revenue:.0f}€", "roas": f"{roas:.2f}", "account": account})
-    save(data)
-    roas_icon = "✅" if roas >= ROAS_MINIMUM else "🚨"
-    target = BRAND_TARGETS.get(account, 0)
-    target_txt = f"\n🎯 Target: *{target:,}€*\n📈 Achievement: *{round(revenue/target*100)}%*" if target > 0 else ""
-    msg = (
-        f"📊 *Marketing Recap — {today()}*\n"
-        f"👤 {data['users'][uid]['name']}\n\n"
-        f"💸 Spend: *{spend:,.0f}€*\n"
-        f"💰 Revenue: *{revenue:,.0f}€*\n"
-        f"📈 ROAS: *{roas:.2f}* {roas_icon}"
-        f"{target_txt}\n\n"
-        f"🏷 Account: *{account}*"
-    )
-    await update.message.reply_text(msg, parse_mode="Markdown")
-    # ROAS alert to groups
-    if roas < ROAS_MINIMUM:
-        alert = f"🚨 *ROAS ALERT!*\n\n📉 ROAS: *{roas:.2f}* (min: {ROAS_MINIMUM})\n💸 Spend: {spend:,.0f}€\n💰 Revenue: {revenue:,.0f}€\n🏷 Account: {account}\n👤 {data['users'][uid]['name']}\n\n⚠️ Action needed!"
-        for gid in data.get("groups", []):
-            try:
-                await ctx.bot.send_message(chat_id=int(gid), text=alert, parse_mode="Markdown")
-            except Exception as e:
-                logger.warning(f"Group error: {e}")
-
-async def orders_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Sales: /orders total confirmed rejected cod card"""
-    uid = str(update.effective_user.id)
-    data = load()
-    if uid not in data["users"]:
-        await update.message.reply_text("❌ Not registered.", parse_mode="Markdown")
-        return
-    if not ctx.args or len(ctx.args) < 2:
-        await update.message.reply_text("Usage: `/orders total confirmed rejected cod card`\n\nExample: `/orders 45 38 7 25 13`", parse_mode="Markdown")
-        return
-    try:
-        vals = [int(x) for x in ctx.args[:5]]
-        while len(vals) < 5:
-            vals.append(0)
-        total, confirmed, rejected, cod, card = vals
-    except ValueError:
-        await update.message.reply_text("❌ Use numbers only. Example: `/orders 45 38 7 25 13`", parse_mode="Markdown")
-        return
-    data["stats"].setdefault(uid, {}).setdefault(today(), {}).update({"total": total, "confirmed": confirmed, "rejected": rejected, "cod": cod, "card": card})
-    save(data)
-    conf_rate = round(confirmed/total*100) if total else 0
-    await update.message.reply_text(
-        f"💼 *Sales Orders — {today()}*\n\n"
-        f"📦 Total: *{total}*\n"
-        f"✅ Confirmed: *{confirmed}* ({conf_rate}%)\n"
-        f"❌ Rejected: *{rejected}*\n"
-        f"💵 COD: *{cod}* | 💳 Card: *{card}*",
-        parse_mode="Markdown"
-    )
-
-async def delivery_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Sales: /delivery rate"""
-    uid = str(update.effective_user.id)
-    data = load()
-    if uid not in data["users"] or not ctx.args:
-        await update.message.reply_text("Usage: `/delivery 92`", parse_mode="Markdown")
-        return
-    try:
-        rate = float(ctx.args[0])
-    except ValueError:
-        await update.message.reply_text("❌ Use a number. Example: `/delivery 92`", parse_mode="Markdown")
-        return
-    data["stats"].setdefault(uid, {}).setdefault(today(), {})["delivery_rate"] = f"{rate}%"
-    save(data)
-    icon = "✅" if rate >= 85 else "⚠️" if rate >= 70 else "🚨"
-    await update.message.reply_text(f"🚚 Delivery rate logged: *{rate}%* {icon}", parse_mode="Markdown")
-
-async def resell_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """ReSell: /resell contacted renewed revenue"""
-    uid = str(update.effective_user.id)
-    data = load()
-    if uid not in data["users"]:
-        await update.message.reply_text("❌ Not registered.", parse_mode="Markdown")
-        return
-    if not ctx.args or len(ctx.args) < 2:
-        await update.message.reply_text("Usage: `/resell contacted renewed revenue`\n\nExample: `/resell 45 12 2400`", parse_mode="Markdown")
-        return
-    try:
-        contacted = int(ctx.args[0])
-        renewed = int(ctx.args[1])
-        revenue = float(ctx.args[2]) if len(ctx.args) > 2 else 0
-    except ValueError:
-        await update.message.reply_text("❌ Use numbers only.", parse_mode="Markdown")
-        return
-    conv = round(renewed/contacted*100) if contacted else 0
-    data["stats"].setdefault(uid, {}).setdefault(today(), {}).update({"contacted": contacted, "renewed": renewed, "revenue": f"{revenue:.0f}€", "conversion": f"{conv}%"})
-    save(data)
-    await update.message.reply_text(
-        f"🔄 *ReSell Stats — {today()}*\n\n"
-        f"📞 Contacted: *{contacted}*\n"
-        f"✅ Renewed: *{renewed}* ({conv}%)\n"
-        f"💰 Revenue: *{revenue:,.0f}€*",
-        parse_mode="Markdown"
-    )
-
-async def shipped_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Warehouse: /shipped shipped returned unfulfilled"""
-    uid = str(update.effective_user.id)
-    data = load()
-    if uid not in data["users"]:
-        await update.message.reply_text("❌ Not registered.", parse_mode="Markdown")
-        return
-    if not ctx.args:
-        await update.message.reply_text("Usage: `/shipped shipped returned unfulfilled`\n\nExample: `/shipped 85 5 3`", parse_mode="Markdown")
-        return
-    try:
-        vals = [int(x) for x in ctx.args[:3]]
-        while len(vals) < 3:
-            vals.append(0)
-        shipped, returned, unfulfilled = vals
-    except ValueError:
-        await update.message.reply_text("❌ Use numbers only.", parse_mode="Markdown")
-        return
-    data["stats"].setdefault(uid, {}).setdefault(today(), {}).update({"shipped": shipped, "returned": returned, "unfulfilled": unfulfilled})
-    save(data)
-    await update.message.reply_text(
-        f"📦 *Warehouse — {today()}*\n\n"
-        f"📤 Shipped: *{shipped}*\n"
-        f"↩️ Returned: *{returned}*\n"
-        f"⚠️ Unfulfilled: *{unfulfilled}*",
-        parse_mode="Markdown"
-    )
-
-async def stock_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Warehouse: /stock product qty"""
-    uid = str(update.effective_user.id)
-    data = load()
-    if uid not in data["users"]:
-        await update.message.reply_text("❌ Not registered.", parse_mode="Markdown")
-        return
-    if not ctx.args or len(ctx.args) < 2:
-        # Show stock
-        stock = data.get("stock", {})
-        if not stock:
-            await update.message.reply_text("📦 No stock data.\n\nAdd: `/stock ProductName 50`", parse_mode="Markdown")
-            return
-        lines = ["📦 *Current Stock:*\n"]
-        low = []
-        for product, qty in stock.items():
-            icon = "🔴" if qty < 10 else "🟡" if qty < 30 else "🟢"
-            lines.append(f"{icon} {product}: *{qty}*")
-            if qty < 10:
-                low.append(product)
-        if low:
-            lines.append(f"\n⚠️ *Low stock alert:* {', '.join(low)}")
-        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-        return
-    product = ctx.args[0]
-    try:
-        qty = int(ctx.args[1])
-    except ValueError:
-        await update.message.reply_text("❌ Quantity must be a number.", parse_mode="Markdown")
-        return
-    data["stock"][product] = qty
-    save(data)
-    icon = "🔴" if qty < 10 else "🟡" if qty < 30 else "🟢"
-    await update.message.reply_text(f"📦 Stock updated: *{product}* = *{qty}* {icon}", parse_mode="Markdown")
-    # Alert managers if low
-    if qty < 10:
-        alert = f"🚨 *Low Stock Alert!*\n\n📦 *{product}*: only *{qty}* left!\n\nReorder needed!"
-        for mgr_uid in data.get("managers", []):
-            try:
-                await ctx.bot.send_message(chat_id=int(mgr_uid), text=alert, parse_mode="Markdown")
-            except:
-                pass
-
-# ── SAFE OFFERS ────────────────────────────────────────────────────────────
-async def newoffer_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Safe Offers: /newoffer BrandName"""
-    uid = str(update.effective_user.id)
-    data = load()
-    if uid not in data["users"]:
-        await update.message.reply_text("❌ Not registered.", parse_mode="Markdown")
-        return
-    if not ctx.args:
-        await update.message.reply_text("Usage: `/newoffer BrandName`\n\nExample: `/newoffer VSmedic`", parse_mode="Markdown")
-        return
-    brand = " ".join(ctx.args)
-    key = f"{brand}_{today()}"
-    data["offers"][key] = {"brand": brand, "date": today(), "checklist": [False] * len(OFFER_CHECKLIST)}
-    save(data)
-    # Use safe key without special chars for callback
-    safe_key = key.replace(" ", "-")
-    lines = [f"🎯 *New Offer Checklist — {brand}*\n"]
-    keyboard = []
-    for i, item in enumerate(OFFER_CHECKLIST):
-        lines.append(f"⬜ {i+1}. {item}")
-        keyboard.append([InlineKeyboardButton(f"✓ {item[:35]}", callback_data=f"ofr_{safe_key}_{i}")])
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def adddomain_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Safe Offers/Marketing: /adddomain brand https://url"""
-    uid = str(update.effective_user.id)
-    data = load()
-    if uid not in data["users"]:
-        await update.message.reply_text("❌ Not registered.", parse_mode="Markdown")
-        return
-    if not ctx.args or len(ctx.args) < 2:
-        await update.message.reply_text("Usage: `/adddomain Brand https://url`\n\nExample: `/adddomain VSmedic https://vsmarket.online`", parse_mode="Markdown")
-        return
-    brand = ctx.args[0]
-    url = ctx.args[1]
-    data["domains"].append({"brand": brand, "url": url, "added": today(), "status": "unknown"})
-    save(data)
-    await update.message.reply_text(f"✅ Domain added: *{brand}* — {url}", parse_mode="Markdown")
-
-async def checklinks_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Check all registered domains"""
-    data = load()
-    domains = data.get("domains", [])
-    if not domains:
-        await update.message.reply_text("🌐 No domains registered.\n\nAdd: `/adddomain Brand https://url`", parse_mode="Markdown")
-        return
-    await update.message.reply_text(f"🔍 Checking *{len(domains)}* domains...", parse_mode="Markdown")
-    results = []
-    async with aiohttp.ClientSession() as session:
-        for d in domains:
-            try:
-                async with session.head(d["url"], timeout=aiohttp.ClientTimeout(total=8), allow_redirects=True) as resp:
-                    icon = "✅" if resp.status < 400 else "❌"
-                    results.append(f"{icon} *{d['brand']}* — {d['url']}\n   Status: {resp.status}")
-                    d["status"] = "ok" if resp.status < 400 else "error"
-            except Exception as e:
-                results.append(f"❌ *{d['brand']}* — {d['url']}\n   Error: unreachable")
-                d["status"] = "error"
-    save(data)
-    await update.message.reply_text("🌐 *Domain Check Results:*\n\n" + "\n\n".join(results), parse_mode="Markdown")
-
-# ── MEETINGS ───────────────────────────────────────────────────────────────
-async def meeting_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Manager: /meeting 14:00 Title | Team (optional)"""
-    uid = str(update.effective_user.id)
-    data = load()
-    if not is_manager(data, uid):
-        await update.message.reply_text("❌ Only managers can add meetings.", parse_mode="Markdown")
-        return
-    if not ctx.args or len(ctx.args) < 2:
-        await update.message.reply_text(
-            "📅 *Add Meeting:*\n\nUsage: `/meeting 14:00 Title`\nWith team: `/meeting 14:00 Title | Sales Team`",
-            parse_mode="Markdown"
-        )
-        return
-    time_str = ctx.args[0]
-    rest = " ".join(ctx.args[1:])
-    if "|" in rest:
-        parts = rest.split("|")
-        title = parts[0].strip()
-        team = parts[1].strip()
-    else:
-        title = rest
-        team = "All"
-    data["meetings"].append({"id": int(datetime.now().timestamp()), "date": today(), "time": time_str, "title": title, "team": team})
-    save(data)
-    await update.message.reply_text(f"✅ Meeting added: *{time_str}* — {title}\n👥 Team: *{team}*", parse_mode="Markdown")
-
-async def meetings_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = str(update.effective_user.id)
-    data = load()
-    user_team = data["users"].get(uid, {}).get("team", "") if uid in data["users"] else ""
-    meetings = [m for m in data.get("meetings", []) if m.get("date") == today() and (is_manager(data, uid) or m.get("team") == "All" or m.get("team") == user_team)]
-    if not meetings:
-        await update.message.reply_text("📅 No meetings today.", parse_mode="Markdown")
-        return
-    lines = ["📅 *Today's Meetings:*\n"]
-    for m in sorted(meetings, key=lambda x: x.get("time","")):
-        team_tag = f" ({m.get('team','')})" if m.get("team") and m.get("team") != "All" else ""
-        lines.append(f"🕐 *{m['time']}* — {m['title']}{team_tag}")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-
-# ── MANAGER COMMANDS ───────────────────────────────────────────────────────
-async def manager_login(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = str(update.effective_user.id)
-    data = load()
-    if not ctx.args:
-        await update.message.reply_text("Usage: `/manager PASSWORD`", parse_mode="Markdown")
-        return
-    if ctx.args[0] != MANAGER_PASSWORD:
-        await update.message.reply_text("❌ Wrong password.", parse_mode="Markdown")
-        return
-    if uid not in data["managers"]:
-        data["managers"].append(uid)
-        save(data)
-    await update.message.reply_text(
-        "🔐 *Manager access granted!*\n\n"
-        "📋 *Manager commands:*\n"
-        "/teamstatus — Live team status\n"
-        "/teamreport — Weekly report\n"
-        "/timelog — Time log\n"
-        "/dailystats — Today's KPIs\n"
-        "/meeting — Add meeting\n"
-        "/announce — Announce to groups\n"
-        "/targets — ADS targets\n"
-        "/listgroups — Registered groups",
-        parse_mode="Markdown"
-    )
-
-async def teamstatus(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = str(update.effective_user.id)
-    data = load()
-    if not is_manager(data, uid):
-        await update.message.reply_text("❌ Manager only.", parse_mode="Markdown")
-        return
-    if not data["users"]:
-        await update.message.reply_text("No members registered yet.", parse_mode="Markdown")
-        return
-    online = [u for u in data["users"].values() if u.get("clocked_in")]
-    offline = [u for u in data["users"].values() if not u.get("clocked_in")]
-    lines = [f"👥 *Team Live Status — {today()}*\n"]
-    if online:
-        lines.append(f"🟢 *Online ({len(online)}):*")
-        for u in online:
-            sec = get_today_sec(data, [k for k,v in data["users"].items() if v==u][0])
-            lines.append(f"  • {u['name']} — {u.get('team','—')} ({fmt_dur(sec)})")
-    if offline:
-        lines.append(f"\n🔴 *Offline ({len(offline)}):*")
-        for u in offline:
-            lines.append(f"  • {u['name']} — {u.get('team','—')}")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-
-async def teamreport(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = str(update.effective_user.id)
-    data = load()
-    if not is_manager(data, uid):
-        await update.message.reply_text("❌ Manager only.", parse_mode="Markdown")
-        return
-    week_ago = (now_zurich() - timedelta(days=7)).strftime("%Y-%m-%d")
-    lines = [f"📊 *Weekly Team Report*\n📅 {week_ago} → {today()}\n"]
-    total_sec = 0
-    for uid_m, user in data["users"].items():
-        sec = sum(s.get("duration_sec",0) for s in data["sessions"].get(uid_m,[]) if s.get("date","") >= week_ago)
-        total_sec += sec
-        todos = data["todos"].get(uid_m, [])
-        done = sum(1 for t in todos if t.get("done"))
-        lines.append(f"👤 *{user['name']}* — {user.get('team','')}\n   ⏱ {fmt_dur(sec)} | ✅ {done}/{len(todos)}")
-    lines.append(f"\n⏱ *Total team: {fmt_dur(total_sec)}*")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-
-async def timelog(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = str(update.effective_user.id)
-    data = load()
-    if not is_manager(data, uid):
-        await update.message.reply_text("❌ Manager only.", parse_mode="Markdown")
-        return
-    all_sessions = []
-    for uid_m, user in data["users"].items():
-        for s in data["sessions"].get(uid_m, []):
-            if s.get("date") == today():
-                all_sessions.append({**s, "member": user["name"], "team": user.get("team","")})
-    if not all_sessions:
-        await update.message.reply_text(f"⏱ No sessions logged today ({today()}).", parse_mode="Markdown")
-        return
-    lines = [f"⏱ *Time Log — {today()}*\n"]
-    for s in sorted(all_sessions, key=lambda x: x.get("start",0)):
-        lines.append(f"👤 *{s['member']}* — {s['team']}\n   {fmt_time(s['start'])} → {fmt_time(s['end'])} ({fmt_dur(s['duration_sec'])})")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-
-async def daily_stats_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = str(update.effective_user.id)
-    data = load()
-    if not is_manager(data, uid):
-        await update.message.reply_text("❌ Manager only.", parse_mode="Markdown")
-        return
-    lines = [f"📈 *Today's KPIs — {today()}*\n"]
-    for uid_m, user in data["users"].items():
-        stats = data.get("stats", {}).get(uid_m, {}).get(today(), {})
-        if stats:
-            lines.append(f"👤 *{user['name']}* — {user.get('team','')}")
-            for k, v in stats.items():
-                lines.append(f"   • {k}: *{v}*")
-    if len(lines) == 1:
-        lines.append("No KPIs logged today yet.")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-
-async def targets_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    data = load()
-    lines = [f"🎯 *Daily ADS Targets — {today()}*\n"]
-    for brand, target in BRAND_TARGETS.items():
-        if target == 0:
-            continue
-        lines.append(f"📊 *{brand}*: Target *{target:,}€/day*")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        data = {h: info["chat_id"] for h, info in TEAM_HANDLES.items() if info["chat_id"]}
+        with open(CHAT_IDS_FILE, "w") as f:
+            json.dump(data, f)
+        logger.info(f"Saved {len(data)} chat IDs to file")
+    except Exception as e:
+        logger.error(f"Error saving chat IDs: {e}")
 
 
-async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Show all available commands based on role"""
-    uid = str(update.effective_user.id)
-    data = load()
-    user = data["users"].get(uid, {})
-    team = user.get("team", "")
+def get_chat_id_by_handle(handle: str) -> Optional[int]:
+    """Get chat ID from Telegram handle (without @)"""
+    handle = handle.lstrip("@")
+    if handle in TEAM_HANDLES and TEAM_HANDLES[handle]["chat_id"]:
+        return TEAM_HANDLES[handle]["chat_id"]
+    return None
 
-    if is_manager(data, uid):
-        await update.message.reply_text(
-            "📋 *Manager — All Commands*\n\n"
-            "👥 *Team Management:*\n"
-            "`/teamstatus` — Live team status\n"
-            "`/teamreport` — Weekly report\n"
-            "`/timelog` — Today's time log\n"
-            "`/dailystats` — Today's KPIs\n\n"
-            "📅 *Meetings:*\n"
-            "`/meeting 14:00 Title | Team` — Add meeting\n"
-            "`/meetings` — Today's meetings\n\n"
-            "📣 *Announcements:*\n"
-            "`/announce Message` — All groups\n"
-            "`/announce @Marketing Msg` — Marketing only\n"
-            "`/announce @SafeOffers Msg` — Safe Offers only\n"
-            "`/announce @Sales Msg` — Sales only\n"
-            "`/announce @ReSell Msg` — ReSell only\n"
-            "`/announce @Warehouse Msg` — Warehouse only\n"
-            "`/announce @dm Msg` — DM all members\n"
-            "`/announce @Marketing @dm Msg` — Group + DM\n\n"
-            "🏢 *Groups:*\n"
-            "`/listgroups` — Registered groups\n"
-            "`/setup` — Register group (in group)\n"
-            "`/setgroupteam` — Assign team to group\n\n"
-            "🎯 *ADS:*\n"
-            "`/targets` — Daily brand targets\n\n"
-            "⏱ *Personal:*\n"
-            "`/clockin` · `/clockout` · `/status`\n"
-            "`/tasks` · `/daily` · `/report`",
-            parse_mode="Markdown"
-        )
-    elif team == "Marketing Team":
-        await update.message.reply_text(
-            "📋 *Marketing Team — Commands*\n\n"
-            "⏱ *Time:*\n"
-            "`/clockin` · `/clockout` · `/status`\n\n"
-            "✅ *Tasks & Routines:*\n"
-            "`/tasks` — My tasks\n"
-            "`/addtask [h/m/l] Task` — Add task\n"
-            "`/daily` — Daily routines\n"
-            "`/adddaily Task` — Add routine\n\n"
-            "📊 *KPIs:*\n"
-            "`/recap spend revenue roas account` — Log KPIs\n"
-            "`/targets` — Daily ADS targets\n\n"
-            "🌐 *Domains:*\n"
-            "`/checklinks` — Check all domains\n"
-            "`/adddomain Brand https://url` — Add domain\n\n"
-            "📅 *Other:*\n"
-            "`/meetings` — Today's meetings\n"
-            "`/goals Goal1 | Goal2` — Set daily goals\n"
-            "`/report` — Weekly report",
-            parse_mode="Markdown"
-        )
-    elif team == "Safe Offers Team":
-        await update.message.reply_text(
-            "📋 *Safe Offers — Commands*\n\n"
-            "⏱ *Time:*\n"
-            "`/clockin` · `/clockout` · `/status`\n\n"
-            "✅ *Tasks & Routines:*\n"
-            "`/tasks` · `/addtask` · `/daily` · `/adddaily`\n\n"
-            "🎯 *Offers:*\n"
-            "`/newoffer BrandName` — New offer checklist\n\n"
-            "🌐 *Domains:*\n"
-            "`/checklinks` — Check all domains\n"
-            "`/adddomain Brand https://url` — Add domain\n\n"
-            "📅 *Other:*\n"
-            "`/meetings` · `/goals` · `/report`",
-            parse_mode="Markdown"
-        )
-    elif team == "ReSell Team":
-        await update.message.reply_text(
-            "📋 *ReSell Team — Commands*\n\n"
-            "⏱ *Time:*\n"
-            "`/clockin` · `/clockout` · `/status`\n\n"
-            "✅ *Tasks & Routines:*\n"
-            "`/tasks` · `/addtask` · `/daily` · `/adddaily`\n\n"
-            "📊 *KPIs:*\n"
-            "`/resell contacted renewed revenue`\n"
-            "Example: `/resell 45 12 2400`\n\n"
-            "📅 *Other:*\n"
-            "`/meetings` · `/goals` · `/report`",
-            parse_mode="Markdown"
-        )
-    elif team == "Sales Team":
-        await update.message.reply_text(
-            "📋 *Sales Team — Commands*\n\n"
-            "⏱ *Time:*\n"
-            "`/clockin` · `/clockout` · `/status`\n\n"
-            "✅ *Tasks & Routines:*\n"
-            "`/tasks` · `/addtask` · `/daily` · `/adddaily`\n\n"
-            "📊 *KPIs:*\n"
-            "`/orders total confirmed rejected cod card`\n"
-            "Example: `/orders 45 38 7 25 13`\n"
-            "`/delivery rate` — Example: `/delivery 92`\n\n"
-            "📅 *Other:*\n"
-            "`/meetings` · `/goals` · `/report`",
-            parse_mode="Markdown"
-        )
-    elif team == "Warehouse Team":
-        await update.message.reply_text(
-            "📋 *Warehouse Team — Commands*\n\n"
-            "⏱ *Time:*\n"
-            "`/clockin` · `/clockout` · `/status`\n\n"
-            "✅ *Tasks & Routines:*\n"
-            "`/tasks` · `/addtask` · `/daily` · `/adddaily`\n\n"
-            "📦 *KPIs:*\n"
-            "`/shipped shipped returned unfulfilled`\n"
-            "Example: `/shipped 85 5 3`\n"
-            "`/stock` — View stock\n"
-            "`/stock Product 50` — Update stock\n\n"
-            "📅 *Other:*\n"
-            "`/meetings` · `/goals` · `/report`",
-            parse_mode="Markdown"
-        )
-    else:
-        await update.message.reply_text(
-            "📋 *Available Commands:*\n\n"
-            "`/register Your Name` — Register\n"
-            "`/clockin` · `/clockout` · `/status`\n"
-            "`/tasks` · `/daily` · `/report`\n"
-            "`/meetings` · `/goals`\n\n"
-            "Use `/manager PASSWORD` for admin access.",
-            parse_mode="Markdown"
-        )
 
-async def announce_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+def get_name_by_handle(handle: str) -> str:
+    """Get team member name from handle"""
+    handle = handle.lstrip("@")
+    if handle in TEAM_HANDLES:
+        return TEAM_HANDLES[handle]["name"]
+    return handle
+
+
+def is_safe_offers_related(message_text: str) -> bool:
+    """Check if a message is related to Safe Offers department"""
+    safe_keywords = [
+        "safe offers", "safe offer", "clocking", "landing page",
+        "offer structure", "money page", "safe page",
+        "luka", "dušan", "dusan", "lukawolk", "cb9999999999",
+        "project 2.0", "project 3.0", "project 4.0",
+        "vs medic", "vitalix", "mellow mind",
+        "creatives", "ads analytics", "media buy"
+    ]
+    text_lower = message_text.lower()
+    return any(kw in text_lower for kw in safe_keywords)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# NOTION API CLIENT
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+class NotionClient:
+    """Handles all Notion API interactions"""
+
+    def __init__(self):
+        self.api_key = NOTION_API_KEY
+        self.base_url = "https://api.notion.com/v1"
+        self.headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Notion-Version": NOTION_VERSION,
+            "Content-Type": "application/json",
+        }
+
+    async def get_page_content(self, page_id: str) -> Optional[Dict]:
+        """Fetch all blocks from a Notion page"""
+        url = f"{self.base_url}/blocks/{page_id}/children?page_size=100"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=self.headers) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+                else:
+                    logger.error(f"Notion API error {resp.status}: {await resp.text()}")
+                    return None
+
+    async def get_block_children(self, block_id: str) -> Optional[Dict]:
+        """Fetch children of a specific block"""
+        url = f"{self.base_url}/blocks/{block_id}/children?page_size=100"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=self.headers) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+                else:
+                    logger.error(f"Notion block children error {resp.status}")
+                    return None
+
+    async def append_block(self, page_id: str, content: str) -> bool:
+        """Append a text block to a Notion page"""
+        url = f"{self.base_url}/blocks/{page_id}/children"
+        payload = {
+            "children": [
+                {
+                    "object": "block",
+                    "type": "paragraph",
+                    "paragraph": {
+                        "rich_text": [
+                            {
+                                "type": "text",
+                                "text": {"content": content[:2000]}  # Notion limit
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.patch(url, headers=self.headers, json=payload) as resp:
+                if resp.status == 200:
+                    return True
+                else:
+                    logger.error(f"Notion append error {resp.status}: {await resp.text()}")
+                    return False
+
+    async def update_block_text(self, block_id: str, new_text: str) -> bool:
+        """Update an existing block's text"""
+        url = f"{self.base_url}/blocks/{block_id}"
+        payload = {
+            "paragraph": {
+                "rich_text": [
+                    {
+                        "type": "text",
+                        "text": {"content": new_text[:2000]}
+                    }
+                ]
+            }
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.patch(url, headers=self.headers, json=payload) as resp:
+                return resp.status == 200
+
+    def extract_text_from_blocks(self, blocks: List[Dict]) -> str:
+        """Extract plain text from Notion blocks"""
+        texts = []
+        for block in blocks:
+            block_type = block.get("type", "")
+            if block_type in ["paragraph", "heading_1", "heading_2", "heading_3", "bulleted_list_item", "numbered_list_item"]:
+                rich_text = block.get(block_type, {}).get("rich_text", [])
+                for rt in rich_text:
+                    texts.append(rt.get("plain_text", ""))
+            elif block_type == "divider":
+                texts.append("---")
+            elif block_type == "to_do":
+                checked = "✅" if block.get("to_do", {}).get("checked", False) else "⬜"
+                rich_text = block.get("to_do", {}).get("rich_text", [])
+                text = "".join(rt.get("plain_text", "") for rt in rich_text)
+                texts.append(f"{checked} {text}")
+        return "\n".join(texts)
+
+
+notion = NotionClient()
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# OUTBOX PARSER
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def parse_outbox_messages(raw_text: str) -> List[Dict]:
     """
-    /announce Message — send to ALL groups
-    /announce @Marketing Message — send only to Marketing Team group
-    /announce @dm Message — send DM to all members
-    /announce @Marketing @dm Message — send to Marketing group + DM to Marketing members
+    Parse structured messages from Telegram Outbox page.
+
+    Expected format:
+    ---
+    TO: @handle (or GROUP)
+    TYPE: PERSONAL | GROUP | ESCALATION
+    FROM: Omni Sight
+    DATE: 2026-03-16
+    ---
+    Message content here
+    ---
     """
-    uid = str(update.effective_user.id)
-    data = load()
-    if not is_manager(data, uid):
-        await update.message.reply_text("❌ Only managers can send announcements.", parse_mode="Markdown")
-        return
-    if not ctx.args:
-        await update.message.reply_text(
-            "📣 *Announce Commands:*\n\n"
-            "`/announce Message` — all groups\n"
-            "`/announce @Marketing Message` — Marketing group only\n"
-            "`/announce @SafeOffers Message` — Safe Offers group only\n"
-            "`/announce @ReSell Message` — ReSell group only\n"
-            "`/announce @Sales Message` — Sales group only\n"
-            "`/announce @Warehouse Message` — Warehouse group only\n"
-            "`/announce @dm Message` — DM to all members\n"
-            "`/announce @Marketing @dm Message` — group + DM to that team",
-            parse_mode="Markdown"
-        )
-        return
+    messages = []
+    blocks = raw_text.split("---")
 
-    # Team name shortcuts
-    TEAM_SHORTCUTS = {
-        "@marketing": "Marketing Team",
-        "@safeoffers": "Safe Offers Team",
-        "@safe": "Safe Offers Team",
-        "@resell": "ReSell Team",
-        "@sales": "Sales Team",
-        "@warehouse": "Warehouse Team",
-    }
+    i = 0
+    while i < len(blocks):
+        block = blocks[i].strip()
 
-    # Parse args - extract @tags and message
-    target_team = None
-    send_dm = False
-    msg_parts = []
-    for arg in ctx.args:
-        if arg.lower() == "@dm":
-            send_dm = True
-        elif arg.lower() in TEAM_SHORTCUTS:
-            target_team = TEAM_SHORTCUTS[arg.lower()]
+        # Look for TO: header
+        if block.startswith("TO:") or "\nTO:" in block:
+            lines = block.split("\n")
+            msg = {"to": None, "type": "PERSONAL", "from": None, "date": None, "content": "", "raw": block}
+
+            for line in lines:
+                line = line.strip()
+                if line.startswith("TO:"):
+                    msg["to"] = line.replace("TO:", "").strip()
+                elif line.startswith("TYPE:"):
+                    msg["type"] = line.replace("TYPE:", "").strip()
+                elif line.startswith("FROM:"):
+                    msg["from"] = line.replace("FROM:", "").strip()
+                elif line.startswith("DATE:"):
+                    msg["date"] = line.replace("DATE:", "").strip()
+
+            # Next block is the message content
+            if i + 1 < len(blocks):
+                msg["content"] = blocks[i + 1].strip()
+                i += 1
+
+            if msg["to"] and msg["content"]:
+                messages.append(msg)
+
+        i += 1
+
+    return messages
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# MESSAGE SENDER
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+async def send_to_telegram(bot: Bot, message: Dict) -> bool:
+    """Send a parsed outbox message to the correct Telegram destination"""
+    try:
+        to = message["to"]
+        content = message["content"]
+        msg_type = message.get("type", "PERSONAL")
+        from_agent = message.get("from", "TeamFlow")
+
+        # Add agent header
+        header = f"🤖 *{from_agent}*\n{'━' * 20}\n"
+        full_message = header + content
+
+        # Determine destination
+        if to.upper() == "GROUP":
+            # Send to Team Leaders group (all hub leaders see everything)
+            if ADMIN_GROUP_ID:
+                await bot.send_message(
+                    chat_id=int(ADMIN_GROUP_ID),
+                    text=full_message,
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                logger.info(f"Sent GROUP message to Team Leaders group")
+
+            # Also send to Safe Offers group if relevant
+            if SAFE_OFFERS_GROUP_ID and is_safe_offers_related(content):
+                await bot.send_message(
+                    chat_id=int(SAFE_OFFERS_GROUP_ID),
+                    text=full_message,
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                logger.info(f"Sent GROUP message to Safe Offers group")
+
+            return True
+
+        elif to.upper() == "ADMIN" or msg_type == "ESCALATION":
+            # Escalation — send to Team Leaders group + DM Marcus
+            escalation_msg = f"🚨 *ESCALATION*\n{'━' * 20}\n{content}"
+            if ADMIN_GROUP_ID:
+                await bot.send_message(
+                    chat_id=int(ADMIN_GROUP_ID),
+                    text=escalation_msg,
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                logger.info(f"Sent ESCALATION to Team Leaders group")
+
+            # Also DM Marcus directly for urgent visibility
+            marcus_id = get_chat_id_by_handle("marcus_agent")
+            if marcus_id:
+                await bot.send_message(
+                    chat_id=marcus_id,
+                    text=escalation_msg,
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+            return True
+
         else:
-            msg_parts.append(arg)
+            # Personal message — send DM to specific person
+            handle = to.lstrip("@")
+            chat_id = get_chat_id_by_handle(handle)
 
-    if not msg_parts:
-        await update.message.reply_text("❌ Message cannot be empty.", parse_mode="Markdown")
-        return
+            if chat_id:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=full_message,
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                logger.info(f"Sent PERSONAL message to {handle}")
 
-    message = " ".join(msg_parts)
-    team_label = target_team if target_team else "All Teams"
-    msg = f"📣 *Announcement* — _{team_label}_\n\n{message}"
+                # Also forward to Team Leaders group for visibility
+                if ADMIN_GROUP_ID:
+                    admin_msg = f"📨 *DM sent to {get_name_by_handle(handle)}:*\n{content}"
+                    await bot.send_message(
+                        chat_id=int(ADMIN_GROUP_ID),
+                        text=admin_msg,
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
 
-    sent_groups = 0
-    sent_dms = 0
-
-    # Send to groups
-    groups = data.get("groups", [])
-    if not groups and not send_dm:
-        await update.message.reply_text("❌ No groups registered yet.", parse_mode="Markdown")
-        return
-
-    for gid in groups:
-        # Filter by team if specified
-        group_team = data.get("group_teams", {}).get(gid, "ALL")
-        if target_team and group_team != "ALL" and group_team != target_team:
-            continue
-        try:
-            await ctx.bot.send_message(chat_id=int(gid), text=msg, parse_mode="Markdown")
-            sent_groups += 1
-        except Exception as e:
-            logger.warning(f"Group error: {e}")
-
-    # Send DMs
-    if send_dm:
-        for member_uid, user in data["users"].items():
-            if target_team and user.get("team") != target_team:
-                continue
-            try:
-                dm_msg = f"📣 *Message from Management*\n\n{message}"
-                await ctx.bot.send_message(chat_id=int(member_uid), text=dm_msg, parse_mode="Markdown")
-                sent_dms += 1
-            except Exception as e:
-                logger.warning(f"DM error: {e}")
-
-    # Confirmation
-    parts = []
-    if sent_groups: parts.append(f"*{sent_groups}* group(s)")
-    if sent_dms: parts.append(f"*{sent_dms}* member DM(s)")
-    if not parts:
-        await update.message.reply_text("⚠️ No matching groups/members found.", parse_mode="Markdown")
-    else:
-        target_txt = f" → _{target_team}_" if target_team else ""
-        await update.message.reply_text(f"✅ Sent to {' + '.join(parts)}{target_txt}!", parse_mode="Markdown")
-
-async def list_groups(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = str(update.effective_user.id)
-    data = load()
-    if not is_manager(data, uid):
-        await update.message.reply_text("❌ Manager only.", parse_mode="Markdown")
-        return
-    groups = data.get("groups", [])
-    if not groups:
-        await update.message.reply_text("No groups registered yet.\n\nAdd bot to a group and use `/setup`.", parse_mode="Markdown")
-        return
-    lines = [f"🏢 *Registered Groups ({len(groups)}):*\n"]
-    for gid in groups:
-        team = data.get("group_teams", {}).get(gid, "ALL")
-        lines.append(f"• ID: `{gid}` — Team: *{team}*")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-
-# ── GROUP SETUP ────────────────────────────────────────────────────────────
-async def setup_group(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type not in ["group", "supergroup"]:
-        await update.message.reply_text("This command is for groups only.", parse_mode="Markdown")
-        return
-    gid = str(update.effective_chat.id)
-    data = load()
-    if gid not in data["groups"]:
-        data["groups"].append(gid)
-        save(data)
-        await update.message.reply_text(
-            f"✅ Group registered!\n\n"
-            f"Group ID: `{gid}`\n\n"
-            f"Use `/setgroupteam` to assign a specific team.\n"
-            f"Default: ALL teams.",
-            parse_mode="Markdown"
-        )
-    else:
-        await update.message.reply_text(f"✅ Group already registered! ID: `{gid}`", parse_mode="Markdown")
-
-async def set_group_team(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type not in ["group", "supergroup"]:
-        await update.message.reply_text("This command is for groups only.", parse_mode="Markdown")
-        return
-    gid = str(update.effective_chat.id)
-    data = load()
-    keyboard = [[InlineKeyboardButton("All Teams", callback_data=f"gteam_{gid}_ALL")]]
-    for t in TEAMS:
-        keyboard.append([InlineKeyboardButton(t, callback_data=f"gteam_{gid}_{t}")])
-    await update.message.reply_text("Select which team this group is for:", reply_markup=InlineKeyboardMarkup(keyboard))
-
-# ── CALLBACKS ──────────────────────────────────────────────────────────────
-async def button_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = load()
-    uid = str(query.from_user.id)
-
-    if query.data.startswith("setteam_"):
-        team = query.data.replace("setteam_", "")
-        if uid in data["users"]:
-            data["users"][uid]["team"] = team
-            if team in DAILY_ROUTINES:
-                data["daily"][uid] = [{"text": r, "done_date": None} for r in DAILY_ROUTINES[team]]
-            save(data)
-            await query.edit_message_text(
-                f"✅ Team set to *{team}*!\n\n📋 Daily routines loaded.\n\nType `/clockin` to start! 🚀",
-                parse_mode="Markdown"
-            )
-        return
-
-    if query.data.startswith("gteam_"):
-        parts = query.data.split("_", 2)
-        chat_id, team = parts[1], parts[2]
-        data.setdefault("group_teams", {})[chat_id] = team
-        save(data)
-        await query.edit_message_text(f"✅ Group assigned to *{team}*!", parse_mode="Markdown")
-        return
-
-    if query.data.startswith("ofr_"):
-        # Format: ofr_BrandName-Date_idx
-        parts = query.data.split("_")
-        idx = int(parts[-1])
-        safe_key = "_".join(parts[1:-1])
-        # Find matching offer key
-        offers = data.get("offers", {})
-        real_key = None
-        for k in offers:
-            if k.replace(" ", "-") == safe_key:
-                real_key = k
-                break
-        if real_key and real_key in offers:
-            offers[real_key]["checklist"][idx] = not offers[real_key]["checklist"][idx]
-            save(data)
-            done = sum(offers[real_key]["checklist"])
-            total = len(offers[real_key]["checklist"])
-            if done == total:
-                await query.edit_message_text(f"🎉 *Offer Ready!* — {offers[real_key]['brand']}\n\n✅ All {total} steps completed!\n\nNotify Marketing Team! 🚀", parse_mode="Markdown")
+                return True
             else:
-                await query.answer(f"✅ {done}/{total} steps done")
+                logger.warning(f"No chat ID for handle: {handle}. User needs to /start the bot first.")
+                return False
+
+    except Exception as e:
+        logger.error(f"Error sending message: {e}")
+        return False
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# OUTBOX POLLING JOB
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Track which messages we've already sent (by content hash)
+sent_messages = set()
+
+
+async def poll_outbox(context: ContextTypes.DEFAULT_TYPE):
+    """Poll Notion Telegram Outbox for new messages and send them"""
+    try:
+        result = await notion.get_page_content(TELEGRAM_OUTBOX_PAGE_ID)
+        if not result:
+            return
+
+        blocks = result.get("results", [])
+        raw_text = notion.extract_text_from_blocks(blocks)
+
+        # Parse messages from outbox
+        messages = parse_outbox_messages(raw_text)
+
+        for msg in messages:
+            # Create unique hash for this message to avoid duplicates
+            msg_hash = hash(f"{msg['to']}:{msg['content'][:100]}:{msg.get('date', '')}")
+
+            if msg_hash not in sent_messages:
+                success = await send_to_telegram(context.bot, msg)
+                if success:
+                    sent_messages.add(msg_hash)
+                    logger.info(f"Delivered message to {msg['to']}")
+
+                    # Mark as sent in Notion (append confirmation)
+                    now = datetime.now(TZ).strftime("%Y-%m-%d %H:%M")
+                    await notion.append_block(
+                        TELEGRAM_OUTBOX_PAGE_ID,
+                        f"✅ SENT — {msg['to']} — {now}"
+                    )
+
+        # Keep sent_messages set from growing too large
+        if len(sent_messages) > 1000:
+            sent_messages.clear()
+
+    except Exception as e:
+        logger.error(f"Error polling outbox: {e}")
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# MORNING BRIEF JOB
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+async def send_morning_brief(context: ContextTypes.DEFAULT_TYPE):
+    """
+    Read the latest morning brief from AI Suggestions and send to groups.
+    Omni Sight writes the brief to AI Suggestions at 09:00,
+    this bot picks it up at 09:05 and distributes.
+    """
+    try:
+        result = await notion.get_page_content(AI_SUGGESTIONS_PAGE_ID)
+        if not result:
+            logger.warning("Could not read AI Suggestions page")
+            return
+
+        blocks = result.get("results", [])
+        raw_text = notion.extract_text_from_blocks(blocks)
+
+        # Find the latest morning brief
+        today_str = datetime.now(TZ).strftime("%Y-%m-%d")
+        brief_text = None
+
+        # Look for today's brief marker
+        if "MORNING BRIEF" in raw_text and today_str in raw_text:
+            # Extract the brief section
+            start = raw_text.find("MORNING BRIEF")
+            # Find the end (next major section or end of content)
+            end = raw_text.find("WEEKLY SUMMARY", start + 1)
+            if end == -1:
+                end = raw_text.find("SCRIPT IMPROVEMENT", start + 1)
+            if end == -1:
+                end = min(start + 2000, len(raw_text))
+
+            brief_text = raw_text[start:end].strip()
+
+        if brief_text:
+            # Send brief to Team Leaders group (all hub leaders see business overview)
+            leaders_msg = f"📋 *OMNI SIGHT — Daily Brief*\n{'━' * 25}\n{brief_text[:3500]}"
+            if ADMIN_GROUP_ID:
+                await context.bot.send_message(
+                    chat_id=int(ADMIN_GROUP_ID),
+                    text=leaders_msg,
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                logger.info("Morning brief sent to Team Leaders group")
+
+            # Send Safe Offers filtered version
+            if SAFE_OFFERS_GROUP_ID:
+                # Filter for Safe Offers relevant content
+                so_lines = []
+                for line in brief_text.split("\n"):
+                    if any(kw in line.lower() for kw in ["safe offers", "luka", "dušan", "dusan", "all hubs", "overall", "completion", "overdue", "focus"]):
+                        so_lines.append(line)
+
+                if so_lines:
+                    so_msg = f"📋 *Morning Brief — Safe Offers*\n{'━' * 25}\n" + "\n".join(so_lines)
+                    await context.bot.send_message(
+                        chat_id=int(SAFE_OFFERS_GROUP_ID),
+                        text=so_msg[:3500],
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
+                    logger.info("Morning brief (filtered) sent to Safe Offers group")
+        else:
+            logger.info("No morning brief found for today")
+
+    except Exception as e:
+        logger.error(f"Error sending morning brief: {e}")
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# TELEGRAM COMMAND HANDLERS
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Register user's chat ID for personal messages"""
+    user = update.effective_user
+    username = user.username
+
+    if username and username in TEAM_HANDLES:
+        TEAM_HANDLES[username]["chat_id"] = update.effective_chat.id
+        save_chat_ids()
+        await update.message.reply_text(
+            f"✅ Welcome {TEAM_HANDLES[username]['name']}!\n\n"
+            f"You're registered for TeamFlow notifications.\n"
+            f"Department: {', '.join(TEAM_HANDLES[username]['department'])}\n\n"
+            f"Commands:\n"
+            f"/status — Check your pending tasks\n"
+            f"/brief — Get today's morning brief\n"
+            f"/help — See all commands"
+        )
+        logger.info(f"Registered {username} with chat_id {update.effective_chat.id}")
+    else:
+        await update.message.reply_text(
+            f"👋 Hi {user.first_name}!\n\n"
+            f"Your Telegram username (@{username}) is not in the TeamFlow directory.\n"
+            f"Contact Marcus to be added."
+        )
+
+
+async def cmd_setup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Setup command for Marcus to register group chat IDs"""
+    user = update.effective_user
+    if user.username != "marcus_agent":
+        await update.message.reply_text("⛔ Only Marcus can use /setup")
         return
 
-    if query.data.startswith("toggle_"):
-        idx = int(query.data.split("_")[1])
-        todos = data["todos"].get(uid, [])
-        if idx < len(todos):
-            todos[idx]["done"] = not todos[idx]["done"]
-            save(data)
-            s = "✅ Done" if todos[idx]["done"] else "⬜ Undone"
-            await query.edit_message_text(f"{s}: *{todos[idx]['text']}*\n\nType /tasks to see all.", parse_mode="Markdown")
-        return
+    chat = update.effective_chat
 
-    if query.data == "delete_done":
-        before = len(data["todos"].get(uid, []))
-        data["todos"][uid] = [t for t in data["todos"].get(uid, []) if not t.get("done")]
-        deleted = before - len(data["todos"].get(uid, []))
-        save(data)
-        await query.edit_message_text(f"🗑 Deleted *{deleted}* completed task(s).", parse_mode="Markdown")
-        return
+    if len(context.args) > 0:
+        group_type = context.args[0].lower()
 
-    if query.data.startswith("daily_"):
-        idx = int(query.data.split("_")[1])
-        daily_list = data["daily"].get(uid, [])
-        if idx < len(daily_list):
-            daily_list[idx]["done_date"] = None if daily_list[idx].get("done_date") == today() else today()
-            save(data)
-            done = sum(1 for d in daily_list if d.get("done_date") == today())
-            await query.answer(f"📋 {done}/{len(daily_list)} done today")
-        return
-
-# ── SCHEDULED JOBS ─────────────────────────────────────────────────────────
-async def job_morning_motivation(ctx: ContextTypes.DEFAULT_TYPE):
-    if not is_weekday(): return
-    data = load()
-    motivation = random.choice(MOTIVATIONS)
-    for gid in data.get("groups", []):
-        try:
-            await ctx.bot.send_message(chat_id=int(gid), text=f"{motivation}\n\n☀️ *New day, new goals — let's go team!*", parse_mode="Markdown")
-        except Exception as e:
-            logger.warning(f"Group error: {e}")
-
-async def job_morning_meetings(ctx: ContextTypes.DEFAULT_TYPE):
-    if not is_weekday(): return
-    data = load()
-    meetings = [m for m in data.get("meetings", []) if m.get("date") == today()]
-    if not meetings: return
-    lines = ["📅 *Today's Meetings:*\n"]
-    for m in sorted(meetings, key=lambda x: x.get("time","")):
-        team_tag = f" ({m.get('team','')})" if m.get("team") and m.get("team") != "All" else ""
-        lines.append(f"🕐 *{m['time']}* — {m['title']}{team_tag}")
-    msg = "\n".join(lines)
-    for gid in data.get("groups", []):
-        try:
-            await ctx.bot.send_message(chat_id=int(gid), text=msg, parse_mode="Markdown")
-        except Exception as e:
-            logger.warning(f"Group error: {e}")
-
-async def job_clockin_reminder(ctx: ContextTypes.DEFAULT_TYPE):
-    if not is_weekday(): return
-    data = load()
-    for uid, user in data["users"].items():
-        if not user.get("clocked_in"):
-            today_sessions = [s for s in data["sessions"].get(uid, []) if s.get("date") == today()]
-            if not today_sessions:
-                try:
-                    await ctx.bot.send_message(chat_id=int(uid), text=f"⏰ Hey *{user['name']}*, don't forget to clock in!\n\nType `/clockin` to start. 💪", parse_mode="Markdown")
-                except Exception as e:
-                    logger.warning(f"DM error: {e}")
-    keyboard = [[InlineKeyboardButton("▶️ Start Working", url="https://t.me/teamflow_scale_bot")]]
-    msg = "⏰ *Good morning, team!*\n\nIf you haven't clocked in yet — now is the time! 💪"
-    for gid in data.get("groups", []):
-        try:
-            await ctx.bot.send_message(chat_id=int(gid), text=msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
-        except Exception as e:
-            logger.warning(f"Group error: {e}")
-
-async def job_manager_late_alert(ctx: ContextTypes.DEFAULT_TYPE):
-    if not is_weekday(): return
-    data = load()
-    late = []
-    for uid, user in data["users"].items():
-        if not user.get("clocked_in"):
-            if not [s for s in data["sessions"].get(uid, []) if s.get("date") == today()]:
-                late.append(f"• {user['name']} — {user.get('team','')}")
-    if late:
-        msg = f"🚨 *Late Alert — 10:30*\n\nNot clocked in yet:\n\n" + "\n".join(late)
-        for mgr_uid in data.get("managers", []):
-            try:
-                await ctx.bot.send_message(chat_id=int(mgr_uid), text=msg, parse_mode="Markdown")
-            except Exception as e:
-                logger.warning(f"Manager DM error: {e}")
-
-async def job_daily_summary_groups(ctx: ContextTypes.DEFAULT_TYPE):
-    if not is_weekday(): return
-    data = load()
-    for gid in data.get("groups", []):
-        assigned_team = data.get("group_teams", {}).get(gid, "ALL")
-        teams_to_post = list(SUMMARY_QUESTIONS.keys()) if assigned_team == "ALL" else ([assigned_team] if assigned_team in SUMMARY_QUESTIONS else [])
-        for team in teams_to_post:
-            question = SUMMARY_QUESTIONS[team]
-            try:
-                await ctx.bot.send_message(chat_id=int(gid), text=question, parse_mode="Markdown")
-            except Exception as e:
-                logger.warning(f"Group error: {e}")
-
-async def job_overdue_tasks(ctx: ContextTypes.DEFAULT_TYPE):
-    if not is_weekday(): return
-    data = load()
-    for uid, user in data["users"].items():
-        todos = data["todos"].get(uid, [])
-        overdue = [t for t in todos if not t.get("done") and t.get("pri") == "h"]
-        if overdue:
-            task_list = "\n".join([f"• 🔴 {t['text']}" for t in overdue[:5]])
-            try:
-                await ctx.bot.send_message(chat_id=int(uid), text=f"⚠️ *{user['name']}*, *{len(overdue)}* high priority task(s) pending:\n\n{task_list}\n\nType `/tasks` to manage! 💪", parse_mode="Markdown")
-            except Exception as e:
-                logger.warning(f"DM error: {e}")
-
-async def job_eod_personal_summary(ctx: ContextTypes.DEFAULT_TYPE):
-    if not is_weekday(): return
-    data = load()
-    for uid, user in data["users"].items():
-        today_sec = get_today_sec(data, uid)
-        todos = data["todos"].get(uid, [])
-        done_tasks = sum(1 for t in todos if t.get("done"))
-        daily_list = data["daily"].get(uid, [])
-        daily_done = sum(1 for d in daily_list if d.get("done_date") == today())
-        try:
-            await ctx.bot.send_message(
-                chat_id=int(uid),
-                text=f"🌆 *End of Day — {user['name']}*\n📅 {today()}\n\n"
-                     f"⏱ *{fmt_dur(today_sec)}* worked\n"
-                     f"✅ Tasks: *{done_tasks}/{len(todos)}*\n"
-                     f"📋 Routines: *{daily_done}/{len(daily_list)}*\n\n"
-                     f"Don't forget `/clockout` if still working! 👋",
-                parse_mode="Markdown"
+        if group_type == "admin":
+            global ADMIN_GROUP_ID
+            ADMIN_GROUP_ID = str(chat.id)
+            await update.message.reply_text(
+                f"✅ Team Leaders group registered!\n"
+                f"Chat ID: {chat.id}\n"
+                f"All hub leaders will see business updates here.\n"
+                f"Set ADMIN_GROUP_ID={chat.id} in your Render env vars."
             )
-        except Exception as e:
-            logger.warning(f"DM error: {e}")
+        elif group_type == "safeoffers":
+            global SAFE_OFFERS_GROUP_ID
+            SAFE_OFFERS_GROUP_ID = str(chat.id)
+            await update.message.reply_text(
+                f"✅ Safe Offers group registered!\n"
+                f"Chat ID: {chat.id}\n"
+                f"Set SAFE_OFFERS_GROUP_ID={chat.id} in your Render env vars."
+            )
+        else:
+            await update.message.reply_text(
+                "Usage:\n"
+                "/setup admin — Register this chat as Team Leaders group\n"
+                "/setup safeoffers — Register this chat as Safe Offers group"
+            )
+    else:
+        await update.message.reply_text(
+            "Usage:\n"
+            "/setup admin — Register this chat as Admin group\n"
+            "/setup safeoffers — Register this chat as Safe Offers group"
+        )
 
-async def job_clockout_reminder(ctx: ContextTypes.DEFAULT_TYPE):
-    if not is_weekday(): return
-    data = load()
-    keyboard = [[InlineKeyboardButton("■ Clock Out Now", url="https://t.me/teamflow_scale_bot")]]
-    msg = "🔔 *End of Day Reminder!*\n\nIf you're still working — don't forget to clock out! 👋"
-    for uid, user in data["users"].items():
-        if user.get("clocked_in"):
-            try:
-                await ctx.bot.send_message(chat_id=int(uid), text=f"🔔 *{user['name']}*, you're still clocked in!\n\nDon't forget to `/clockout`! 👋", parse_mode="Markdown")
-            except:
-                pass
-    for gid in data.get("groups", []):
-        try:
-            await ctx.bot.send_message(chat_id=int(gid), text=msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
-        except Exception as e:
-            logger.warning(f"Group error: {e}")
 
-async def job_manager_daily_digest(ctx: ContextTypes.DEFAULT_TYPE):
-    if not is_weekday(): return
-    data = load()
-    if not data["users"]: return
-    online = sum(1 for u in data["users"].values() if u.get("clocked_in"))
-    total_sec = sum(get_today_sec(data, uid) for uid in data["users"])
-    lines = [f"📊 *Daily Manager Digest — {today()}*\n", f"👥 {len(data['users'])} members | 🟢 {online} online", f"⏱ Total hours: *{fmt_dur(total_sec)}*\n", "*Individual:*"]
-    for uid, user in data["users"].items():
-        sec = get_today_sec(data, uid)
-        todos = data["todos"].get(uid, [])
-        done = sum(1 for t in todos if t.get("done"))
-        daily_list = data["daily"].get(uid, [])
-        daily_done = sum(1 for d in daily_list if d.get("done_date") == today())
-        is_on = "🟢" if user.get("clocked_in") else "🔴"
-        lines.append(f"{is_on} *{user['name']}* — {user.get('team','')}")
-        lines.append(f"   ⏱ {fmt_dur(sec)} | ✅ {done}/{len(todos)} | 📋 {daily_done}/{len(daily_list)}")
-    msg = "\n".join(lines)
-    for mgr_uid in data.get("managers", []):
-        try:
-            await ctx.bot.send_message(chat_id=int(mgr_uid), text=msg, parse_mode="Markdown")
-        except Exception as e:
-            logger.warning(f"Manager DM error: {e}")
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show user's current task status from Notion"""
+    user = update.effective_user
+    username = user.username
+    name = get_name_by_handle(username) if username else "Unknown"
 
-async def job_weekly_report_groups(ctx: ContextTypes.DEFAULT_TYPE):
-    data = load()
-    week_ago = (now_zurich() - timedelta(days=7)).strftime("%Y-%m-%d")
-    lines = [f"📊 *Weekly Team Report*\n📅 {week_ago} → {today()}\n"]
-    total = 0
-    for uid_m, user in data["users"].items():
-        sec = sum(s.get("duration_sec",0) for s in data["sessions"].get(uid_m,[]) if s.get("date","") >= week_ago)
-        total += sec
-        todos = data["todos"].get(uid_m, [])
-        done = sum(1 for t in todos if t.get("done"))
-        lines.append(f"👤 *{user['name']}* — {user.get('team','')}\n   ⏱ {fmt_dur(sec)} | ✅ {done}/{len(todos)}")
-    lines.append(f"\n⏱ *Total team: {fmt_dur(total)}*")
-    msg = "\n".join(lines)
-    for gid in data.get("groups", []):
-        try:
-            await ctx.bot.send_message(chat_id=int(gid), text=msg, parse_mode="Markdown")
-        except Exception as e:
-            logger.warning(f"Group error: {e}")
-    for mgr_uid in data.get("managers", []):
-        try:
-            await ctx.bot.send_message(chat_id=int(mgr_uid), text=msg, parse_mode="Markdown")
-        except Exception as e:
-            logger.warning(f"Manager DM error: {e}")
+    await update.message.reply_text(
+        f"📊 *Status for {name}*\n\n"
+        f"Omni Sight monitors your tasks automatically.\n"
+        f"Check your hub's Fix Tasks in Notion for details.\n\n"
+        f"Mention @OmniSight in Notion for a personalized update.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
 
-async def job_warehouse_monday_reminder(ctx: ContextTypes.DEFAULT_TYPE):
-    data = load()
-    msg = "📦 *Warehouse Weekly Call in 30 minutes!*\n\n🕐 16:00 (Zurich)\n\n📋 Prepare:\n• Last week stock summary\n• Items below minimum\n• Returns & damages\n\nGet ready! 🚀"
-    for gid in data.get("groups", []):
-        try:
-            await ctx.bot.send_message(chat_id=int(gid), text=msg, parse_mode="Markdown")
-        except:
-            pass
-    for uid, user in data["users"].items():
-        if user.get("team") == "Warehouse Team":
-            try:
-                await ctx.bot.send_message(chat_id=int(uid), text=msg, parse_mode="Markdown")
-            except:
-                pass
 
-# ── MAIN ───────────────────────────────────────────────────────────────────
-async def run():
-    app = Application.builder().token(TOKEN).build()
+async def cmd_brief(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Get today's morning brief on demand"""
+    await update.message.reply_text("📋 Fetching today's brief from Notion...")
 
-    # Handlers
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("register", register))
-    app.add_handler(CommandHandler("clockin", clockin))
-    app.add_handler(CommandHandler("clockout", clockout))
-    app.add_handler(CommandHandler("status", status))
-    app.add_handler(CommandHandler("tasks", tasks))
-    app.add_handler(CommandHandler("addtask", addtask))
-    app.add_handler(CommandHandler("daily", daily))
-    app.add_handler(CommandHandler("adddaily", adddaily))
-    app.add_handler(CommandHandler("goals", goals_cmd))
-    app.add_handler(CommandHandler("report", report))
-    app.add_handler(CommandHandler("recap", recap_cmd))
-    app.add_handler(CommandHandler("orders", orders_cmd))
-    app.add_handler(CommandHandler("delivery", delivery_cmd))
-    app.add_handler(CommandHandler("resell", resell_cmd))
-    app.add_handler(CommandHandler("shipped", shipped_cmd))
-    app.add_handler(CommandHandler("stock", stock_cmd))
-    app.add_handler(CommandHandler("newoffer", newoffer_cmd))
-    app.add_handler(CommandHandler("adddomain", adddomain_cmd))
-    app.add_handler(CommandHandler("checklinks", checklinks_cmd))
-    app.add_handler(CommandHandler("meeting", meeting_cmd))
-    app.add_handler(CommandHandler("meetings", meetings_today))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("announce", announce_cmd))
-    app.add_handler(CommandHandler("targets", targets_cmd))
-    app.add_handler(CommandHandler("manager", manager_login))
-    app.add_handler(CommandHandler("teamstatus", teamstatus))
-    app.add_handler(CommandHandler("teamreport", teamreport))
-    app.add_handler(CommandHandler("timelog", timelog))
-    app.add_handler(CommandHandler("dailystats", daily_stats_cmd))
-    app.add_handler(CommandHandler("listgroups", list_groups))
-    app.add_handler(CommandHandler("setup", setup_group))
-    app.add_handler(CommandHandler("setgroupteam", set_group_team))
-    app.add_handler(CallbackQueryHandler(button_callback))
+    # Reuse the morning brief function but send to requesting user
+    try:
+        result = await notion.get_page_content(AI_SUGGESTIONS_PAGE_ID)
+        if not result:
+            await update.message.reply_text("❌ Could not read AI Suggestions page")
+            return
 
-    # Scheduled jobs
-    jq = app.job_queue
-    jq.run_daily(job_morning_motivation,       time=datetime.strptime("09:00","%H:%M").replace(tzinfo=TZ).timetz())
-    jq.run_daily(job_morning_meetings,         time=datetime.strptime("08:30","%H:%M").replace(tzinfo=TZ).timetz())
-    jq.run_daily(job_clockin_reminder,         time=datetime.strptime("10:00","%H:%M").replace(tzinfo=TZ).timetz())
-    jq.run_daily(job_manager_late_alert,       time=datetime.strptime("10:30","%H:%M").replace(tzinfo=TZ).timetz())
-    jq.run_daily(job_daily_summary_groups,     time=datetime.strptime("14:00","%H:%M").replace(tzinfo=TZ).timetz())
-    jq.run_daily(job_overdue_tasks,            time=datetime.strptime("16:00","%H:%M").replace(tzinfo=TZ).timetz())
-    jq.run_daily(job_eod_personal_summary,     time=datetime.strptime("17:30","%H:%M").replace(tzinfo=TZ).timetz())
-    jq.run_daily(job_clockout_reminder,        time=datetime.strptime("18:00","%H:%M").replace(tzinfo=TZ).timetz())
-    jq.run_daily(job_manager_daily_digest,     time=datetime.strptime("18:30","%H:%M").replace(tzinfo=TZ).timetz())
-    jq.run_daily(job_weekly_report_groups,     time=datetime.strptime("16:00","%H:%M").replace(tzinfo=TZ).timetz(), days=(6,))
-    jq.run_daily(job_warehouse_monday_reminder,time=datetime.strptime("15:30","%H:%M").replace(tzinfo=TZ).timetz(), days=(0,))
+        blocks = result.get("results", [])
+        raw_text = notion.extract_text_from_blocks(blocks)
 
-    # Set bot commands
-    default_cmds = [BotCommand("start","👋 Open TeamFlow"), BotCommand("register","📝 Register"), BotCommand("manager","🔐 Admin login")]
-    member_cmds = [
-        BotCommand("start","👋 Open TeamFlow"), BotCommand("clockin","▶️ Clock in"), BotCommand("clockout","■ Clock out"),
-        BotCommand("status","📊 My status"), BotCommand("tasks","✅ My tasks"), BotCommand("addtask","➕ Add task"),
-        BotCommand("daily","📋 Daily routines"), BotCommand("goals","🎯 Set goals"), BotCommand("report","📈 My report"),
-        BotCommand("meetings","📅 Today's meetings"), BotCommand("targets","🎯 ADS targets"),
-    ]
-    team_extra = {
-        "Marketing Team": [BotCommand("recap","📢 Log marketing KPIs"), BotCommand("checklinks","🌐 Check domains"), BotCommand("adddomain","➕ Add domain")],
-        "Safe Offers Team": [BotCommand("newoffer","🎯 New offer checklist"), BotCommand("checklinks","🌐 Check domains"), BotCommand("adddomain","➕ Add domain")],
-        "ReSell Team": [BotCommand("resell","🔄 Log ReSell stats")],
-        "Sales Team": [BotCommand("orders","💼 Log orders"), BotCommand("delivery","🚚 Delivery rate")],
-        "Warehouse Team": [BotCommand("shipped","📦 Log shipped"), BotCommand("stock","📦 Stock update")],
-    }
-    mgr_cmds = [
-        BotCommand("start","👋 Open TeamFlow"), BotCommand("teamstatus","👥 Team status"),
-        BotCommand("teamreport","📊 Weekly report"), BotCommand("timelog","⏱ Time log"),
-        BotCommand("dailystats","📈 Today's KPIs"), BotCommand("meeting","📅 Add meeting"),
-        BotCommand("meetings","📅 Today's meetings"), BotCommand("announce","📣 Announce"),
-        BotCommand("listgroups","🏢 Groups"), BotCommand("targets","🎯 ADS targets"),
-        BotCommand("clockin","▶️ Clock in"), BotCommand("clockout","■ Clock out"),
-        BotCommand("help","📋 All commands"),
-    ]
+        today_str = datetime.now(TZ).strftime("%Y-%m-%d")
 
-    print("✅ TeamFlow bot starting...")
-    async with app:
-        await app.bot.set_my_commands(default_cmds, scope=BotCommandScopeDefault())
-        data = load()
-        for uid, user in data["users"].items():
-            team = user.get("team","")
-            cmds = member_cmds + team_extra.get(team, [])
-            try:
-                await app.bot.set_my_commands(cmds, scope=BotCommandScopeChat(chat_id=int(uid)))
-            except Exception as e:
-                logger.warning(f"Could not set commands for {uid}: {e}")
-        for mgr_uid in data.get("managers", []):
-            try:
-                await app.bot.set_my_commands(mgr_cmds, scope=BotCommandScopeChat(chat_id=int(mgr_uid)))
-            except Exception as e:
-                logger.warning(f"Could not set manager commands: {e}")
-        await app.start()
-        await app.updater.start_polling(drop_pending_updates=True)
-        await asyncio.Event().wait()
+        if "MORNING BRIEF" in raw_text:
+            start = raw_text.rfind("MORNING BRIEF")
+            end = min(start + 2000, len(raw_text))
+            brief = raw_text[start:end].strip()
+
+            await update.message.reply_text(
+                f"📋 *Latest Brief*\n{'━' * 25}\n{brief[:3500]}",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        else:
+            await update.message.reply_text("No morning brief found. Omni Sight may not have run yet today.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
+
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show available commands"""
+    await update.message.reply_text(
+        "🤖 *TeamFlow Bot Commands*\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "/start — Register for notifications\n"
+        "/status — Check your task status\n"
+        "/brief — Get today's morning brief\n"
+        "/help — Show this message\n\n"
+        "*Admin only:*\n"
+        "/setup admin — Set this chat as Team Leaders group\n"
+        "/setup safeoffers — Set this chat as Safe Offers group\n"
+        "/force\\_brief — Force send morning brief now\n"
+        "/outbox — Check Outbox for pending messages\n",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def cmd_force_brief(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Force send morning brief (admin only)"""
+    user = update.effective_user
+    if user.username != "marcus_agent":
+        await update.message.reply_text("⛔ Only Marcus can use /force_brief")
+        return
+
+    await update.message.reply_text("📋 Forcing morning brief delivery...")
+    await send_morning_brief(context)
+    await update.message.reply_text("✅ Morning brief sent to all groups")
+
+
+async def cmd_outbox(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Check Outbox status (admin only)"""
+    user = update.effective_user
+    if user.username != "marcus_agent":
+        await update.message.reply_text("⛔ Only Marcus can use /outbox")
+        return
+
+    try:
+        result = await notion.get_page_content(TELEGRAM_OUTBOX_PAGE_ID)
+        if result:
+            blocks = result.get("results", [])
+            raw_text = notion.extract_text_from_blocks(blocks)
+            messages = parse_outbox_messages(raw_text)
+
+            pending = [m for m in messages if hash(f"{m['to']}:{m['content'][:100]}:{m.get('date', '')}") not in sent_messages]
+
+            await update.message.reply_text(
+                f"📬 *Telegram Outbox Status*\n\n"
+                f"Total messages parsed: {len(messages)}\n"
+                f"Pending delivery: {len(pending)}\n"
+                f"Already sent: {len(sent_messages)}\n\n"
+                f"Outbox is polled every {OUTBOX_POLL_INTERVAL} seconds.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        else:
+            await update.message.reply_text("❌ Could not read Outbox page")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
+
+
+async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle messages in group chats (for future reply-to-bot feature)"""
+    # For now, just log group messages that mention the bot
+    if update.message and update.message.text:
+        text = update.message.text
+        bot_username = context.bot.username
+
+        if f"@{bot_username}" in text:
+            await update.message.reply_text(
+                "👋 I'm TeamFlow Bot! I deliver notifications from Omni Sight and Stratex.\n"
+                "Use /help to see available commands."
+            )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# HEALTH CHECK (for Render)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+async def health_check():
+    """Simple HTTP server for Render health checks"""
+    from aiohttp import web
+
+    async def handle(request):
+        return web.Response(text="TeamFlow Bot is running ✅")
+
+    app = web.Application()
+    app.router.add_get("/", handle)
+    app.router.add_get("/health", handle)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.getenv("PORT", "10000"))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logger.info(f"Health check server running on port {port}")
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# MAIN
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def main():
+    """Start the bot"""
+    # Validate config
+    if not BOT_TOKEN:
+        logger.error("BOT_TOKEN not set! Set it in environment variables.")
+        return
+    if not NOTION_API_KEY:
+        logger.error("NOTION_API_KEY not set! Set it in environment variables.")
+        return
+
+    # Load saved chat IDs
+    load_chat_ids()
+
+    # Build application
+    app = Application.builder().token(BOT_TOKEN).build()
+
+    # Register command handlers
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("setup", cmd_setup))
+    app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("brief", cmd_brief))
+    app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("force_brief", cmd_force_brief))
+    app.add_handler(CommandHandler("outbox", cmd_outbox))
+
+    # Group message handler
+    app.add_handler(MessageHandler(
+        filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND,
+        handle_group_message
+    ))
+
+    # Schedule jobs
+    job_queue = app.job_queue
+
+    # Poll Notion Outbox every 60 seconds
+    job_queue.run_repeating(
+        poll_outbox,
+        interval=OUTBOX_POLL_INTERVAL,
+        first=10,
+        name="outbox_poll"
+    )
+
+    # Morning brief at 09:05 (5 min after Omni Sight runs at 09:00)
+    brief_time = datetime.now(TZ).replace(
+        hour=MORNING_BRIEF_HOUR,
+        minute=MORNING_BRIEF_MINUTE,
+        second=0,
+        microsecond=0,
+    ).timetz()
+
+    job_queue.run_daily(
+        send_morning_brief,
+        time=brief_time,
+        name="morning_brief"
+    )
+
+    logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    logger.info("🤖 TeamFlow Bot v2.0 Starting")
+    logger.info(f"📬 Outbox polling: every {OUTBOX_POLL_INTERVAL}s")
+    logger.info(f"📋 Morning brief: {MORNING_BRIEF_HOUR}:{MORNING_BRIEF_MINUTE:02d}")
+    logger.info(f"🌍 Timezone: {TZ}")
+    logger.info(f"👥 Team Leaders Group: {'SET' if ADMIN_GROUP_ID else 'NOT SET'}")
+    logger.info(f"🔒 Safe Offers Group: {'SET' if SAFE_OFFERS_GROUP_ID else 'NOT SET'}")
+    logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+    # Start health check server in background
+    loop = asyncio.get_event_loop()
+    loop.create_task(health_check())
+
+    # Start polling
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
 
 if __name__ == "__main__":
-    try:
-        requests.get(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook?drop_pending_updates=true", timeout=5)
-    except:
-        pass
-    asyncio.run(run())
+    main()
