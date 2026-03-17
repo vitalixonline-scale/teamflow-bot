@@ -38,6 +38,7 @@ import aiohttp
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 NOTION_API_KEY = os.getenv("NOTION_API_KEY")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 NOTION_VERSION = "2022-06-28"
 
 # Notion Page IDs
@@ -627,6 +628,132 @@ def get_eod_message() -> str:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# CLAUDE AI ENGINE
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+OMNI_SIGHT_SYSTEM = """You are Omni Sight — an AI operations monitoring agent for TeamFlow.
+Your role: analyze task data, identify bottlenecks, flag overdue items, spot patterns in team velocity.
+Tone: professional, direct, data-driven. Use clear metrics and actionable observations.
+Keep responses concise (max 800 chars for Telegram). Use bullet points sparingly.
+Never use emojis excessively — max 2-3 per message. Always end with one clear action item.
+Language: English only."""
+
+STRATEX_SYSTEM = """You are Stratex — an AI strategy and optimization agent for TeamFlow.
+Your role: analyze workload distribution, suggest priority rebalancing, recommend process improvements, deliver strategic insights.
+Tone: visionary but practical, motivational but grounded in data. Think like a COO.
+Keep responses concise (max 800 chars for Telegram). Focus on the big picture.
+Never use emojis excessively — max 2-3 per message. Always end with a strategic recommendation.
+Language: English only."""
+
+
+async def ask_claude(persona: str, prompt: str, context_data: str = "") -> Optional[str]:
+    """Call Claude API with the specified persona. Returns AI response or None on failure."""
+    if not ANTHROPIC_API_KEY:
+        logger.warning("ANTHROPIC_API_KEY not set — skipping AI generation")
+        return None
+
+    system_prompt = OMNI_SIGHT_SYSTEM if persona == "omni_sight" else STRATEX_SYSTEM
+
+    user_message = prompt
+    if context_data:
+        user_message = f"{prompt}\n\nHere is the current data:\n{context_data}"
+
+    payload = {
+        "model": "claude-sonnet-4-20250514",
+        "max_tokens": 500,
+        "system": system_prompt,
+        "messages": [{"role": "user", "content": user_message}]
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": ANTHROPIC_API_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    text = data.get("content", [{}])[0].get("text", "")
+                    return text.strip() if text else None
+                else:
+                    error = await resp.text()
+                    logger.error(f"Claude API error {resp.status}: {error[:200]}")
+                    return None
+    except Exception as e:
+        logger.error(f"Claude API request failed: {e}")
+        return None
+
+
+async def ai_morning_briefing(task_summary: str) -> str:
+    """Generate AI-powered morning briefing from task data."""
+    prompt = (
+        "Generate a concise morning briefing for the team. "
+        "Highlight top priorities, overdue items, and one motivational insight. "
+        "Format for Telegram (markdown). Keep it under 600 characters."
+    )
+    result = await ask_claude("omni_sight", prompt, task_summary)
+    return result or f"Good morning team. Here's your task overview:\n\n{task_summary[:500]}"
+
+
+async def ai_eod_recap(task_summary: str) -> str:
+    """Generate AI-powered end-of-day strategic recap."""
+    prompt = (
+        "Generate an end-of-day recap for the team. "
+        "Summarize what was accomplished, what's still pending, and give one strategic "
+        "recommendation for tomorrow. Format for Telegram (markdown). Keep it under 600 characters."
+    )
+    result = await ask_claude("stratex", prompt, task_summary)
+    return result or get_eod_message()
+
+
+async def ai_motivation(time_of_day: str = "morning") -> str:
+    """Generate AI-powered motivational message."""
+    now = datetime.now(TZ)
+    day_name = now.strftime("%A")
+    prompt = (
+        f"Generate a short, powerful {time_of_day} motivational message for a business operations team. "
+        f"Today is {day_name}. Be specific to the day. "
+        f"Max 300 characters. No generic cliches. Make it feel personal and energizing."
+    )
+    result = await ask_claude("stratex", prompt)
+    return result or get_motivation_message()
+
+
+async def ai_personal_insight(name: str, tasks: List[Dict]) -> str:
+    """Generate personalized AI insight for a team member's tasks."""
+    task_lines = []
+    for t in tasks[:8]:
+        line = f"- {t.get('title', 'Untitled')} | Status: {t.get('status', 'N/A')} | Due: {t.get('due_date', 'N/A')}"
+        task_lines.append(line)
+    task_text = "\n".join(task_lines) if task_lines else "No tasks assigned"
+
+    prompt = (
+        f"Give {name} a brief personalized task insight. "
+        f"Identify their most urgent item and suggest a focus strategy. "
+        f"Be encouraging but direct. Max 400 characters."
+    )
+    result = await ask_claude("omni_sight", prompt, task_text)
+    return result
+
+
+async def ai_weekly_analysis(hub_summaries: str) -> str:
+    """Generate AI-powered weekly strategic analysis."""
+    prompt = (
+        "Analyze this week's team performance across all hubs. "
+        "Identify the strongest performer, biggest bottleneck, and one process improvement. "
+        "End with a strategic priority for next week. Format for Telegram. Max 800 characters."
+    )
+    result = await ask_claude("stratex", prompt, hub_summaries)
+    return result
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # OUTBOX PARSER
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -811,8 +938,10 @@ async def poll_outbox(context: ContextTypes.DEFAULT_TYPE):
 async def job_morning_motivation(context: ContextTypes.DEFAULT_TYPE):
     """09:00 — Morning motivation to groups"""
     try:
-        motivation = get_motivation_message()
-        msg = f"🌅 *Good morning, team!*\n\n{motivation}"
+        ai_msg = await ai_motivation("morning")
+        motivation = ai_msg if ai_msg else get_motivation_message()
+        header = format_agent_header("Stratex")
+        msg = f"{header}🌅 *Good morning, team!*\n\n{motivation}"
 
         if ADMIN_GROUP_ID:
             await context.bot.send_message(
@@ -902,7 +1031,12 @@ async def job_personal_task_briefing(context: ContextTypes.DEFAULT_TYPE):
                 if overdue_count > 0:
                     msg += f"\n⚠️ *{overdue_count} overdue task(s)* — please prioritize these.\n"
 
-                msg += "\nIf you need help with anything, just message me here. Have a productive day! 🎯"
+                # Add AI-powered personal insight
+                ai_insight = await ai_personal_insight(name, tasks)
+                if ai_insight:
+                    msg += f"\n💡 *Omni Sight Insight:*\n{ai_insight}"
+                else:
+                    msg += "\nIf you need help with anything, just message me here. Have a productive day! 🎯"
 
             else:
                 msg = (
@@ -951,7 +1085,12 @@ async def job_morning_brief(context: ContextTypes.DEFAULT_TYPE):
 
         if brief_text:
             header = format_agent_header("Omni Sight")
-            leaders_msg = f"{header}📋 *Daily Brief*\n{'━' * 25}\n{brief_text[:3500]}"
+            # Enrich with AI analysis if available
+            ai_analysis = await ai_morning_briefing(brief_text[:1500])
+            if ai_analysis and ai_analysis != brief_text[:500]:
+                leaders_msg = f"{header}📋 *Daily Brief*\n{'━' * 25}\n{ai_analysis}\n\n📊 *Raw Data:*\n{brief_text[:2500]}"
+            else:
+                leaders_msg = f"{header}📋 *Daily Brief*\n{'━' * 25}\n{brief_text[:3500]}"
 
             if ADMIN_GROUP_ID:
                 await context.bot.send_message(
@@ -984,14 +1123,31 @@ async def job_morning_brief(context: ContextTypes.DEFAULT_TYPE):
 async def job_eod_group(context: ContextTypes.DEFAULT_TYPE):
     """18:00 — End of day wrap-up to groups"""
     try:
-        eod = get_eod_message()
+        # Gather task summary across hubs for AI analysis
+        all_tasks_summary = []
+        for hub_name, db_id in HUB_DB_MAP.items():
+            if db_id:
+                try:
+                    results = await notion.query_database(db_id)
+                    tasks = notion.extract_tasks_from_db_results(results)
+                    done = sum(1 for t in tasks if t.get("status", "").lower() in ["done", "completed"])
+                    in_prog = sum(1 for t in tasks if t.get("status", "").lower() in ["in progress", "doing"])
+                    total = len(tasks)
+                    all_tasks_summary.append(f"{hub_name}: {done}/{total} done, {in_prog} in progress")
+                except Exception:
+                    pass
+
+        summary_text = "\n".join(all_tasks_summary) if all_tasks_summary else "No task data available"
+        ai_recap = await ai_eod_recap(summary_text)
+
+        header = format_agent_header("Stratex")
         msg = (
-            f"🌆 *That's a wrap for today!*\n\n"
-            f"Great work everyone. Before you sign off:\n"
+            f"{header}🌆 *End of Day Recap*\n{'━' * 25}\n\n"
+            f"{ai_recap}\n\n"
+            f"Before you sign off:\n"
             f"• Update your task status in Notion\n"
             f"• Note anything blocked or pending\n"
-            f"• Quick win? Share it with the team!\n\n"
-            f"{eod}"
+            f"• Quick win? Share it with the team!"
         )
 
         if ADMIN_GROUP_ID:
@@ -1089,15 +1245,22 @@ async def job_weekly_report(context: ContextTypes.DEFAULT_TYPE):
             sheet_lines.append(f"📈 [{name}]({url})")
         sheets_text = "\n".join(sheet_lines)
 
+        # AI strategic analysis of the week
+        ai_strategy = await ai_weekly_analysis(hub_text)
+
         header = format_agent_header("Omni Sight")
         msg = (
             f"{header}"
             f"📊 *Weekly Report — Week {week_num}*\n"
             f"{'━' * 25}\n\n"
             f"*Hub Overview:*\n{hub_text}\n\n"
-            f"*Numbers & Sheets:*\n{sheets_text}\n\n"
-            f"Let's make this week count! 🚀"
         )
+
+        if ai_strategy:
+            stratex_header = format_agent_header("Stratex")
+            msg += f"{stratex_header}*Strategic Analysis:*\n{ai_strategy}\n\n"
+
+        msg += f"*Numbers & Sheets:*\n{sheets_text}\n\nLet's make this week count! 🚀"
 
         if ADMIN_GROUP_ID:
             await context.bot.send_message(
