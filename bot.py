@@ -1,7 +1,8 @@
 """
-TeamFlow Telegram Bot v2.0
+TeamFlow Telegram Bot v3.0
 100% Notion-integrated — No website functionality
 Reads from Notion Telegram Outbox, sends to Telegram groups and DMs
+Reads Team Directory from Notion — add/remove members without code changes
 Works with Omni Sight and Stratex AI agents
 """
 
@@ -38,6 +39,7 @@ NOTION_VERSION = "2022-06-28"
 # Notion Page IDs (from your workspace)
 TELEGRAM_OUTBOX_PAGE_ID = os.getenv("TELEGRAM_OUTBOX_PAGE_ID", "32541c0c-6404-8162-971f-f78b9609f2aa")
 AI_SUGGESTIONS_PAGE_ID = os.getenv("AI_SUGGESTIONS_PAGE_ID", "32441c0c-6404-81b5-bc39-d5b2711cbfe9")
+TEAM_DIRECTORY_PAGE_ID = os.getenv("TEAM_DIRECTORY_PAGE_ID", "")
 
 # Telegram Group Chat IDs (set via /setup command or env vars)
 ADMIN_GROUP_ID = os.getenv("ADMIN_GROUP_ID")  # Team Leaders group — ALL hub leaders see business overview
@@ -49,6 +51,9 @@ TZ = pytz.timezone(os.getenv("TIMEZONE", "Europe/Rome"))
 # Polling interval for Notion Outbox (seconds)
 OUTBOX_POLL_INTERVAL = int(os.getenv("OUTBOX_POLL_INTERVAL", "60"))
 
+# Refresh team directory from Notion (seconds) — every 5 minutes
+DIRECTORY_REFRESH_INTERVAL = int(os.getenv("DIRECTORY_REFRESH_INTERVAL", "300"))
+
 # Authorized admin usernames (can use /setup, /force_brief, /outbox)
 OWNER_USERNAMES = {"marcus_agent", "mate_marsic"}
 
@@ -58,11 +63,14 @@ MORNING_BRIEF_MINUTE = int(os.getenv("MORNING_BRIEF_MINUTE", "5"))
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # TEAM DIRECTORY (Telegram handles → chat IDs)
+# Loaded from Notion Team Directory page, with hardcoded fallback
 # Chat IDs are populated automatically when team members /start the bot
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-TEAM_HANDLES = {
+# Fallback directory — used only if Notion Team Directory page is not set
+FALLBACK_TEAM_HANDLES = {
     "marcus_agent": {"name": "Marcus", "department": ["Marketing", "Administration"], "chat_id": None},
+    "mate_marsic": {"name": "Mate", "department": ["Marketing", "Administration"], "chat_id": None},
     "nikonbelas": {"name": "Niko", "department": ["Marketing", "Safe Offers"], "chat_id": None},
     "ogiiiiz11": {"name": "Orhan", "department": ["Sales", "Resell"], "chat_id": None},
     "ognjen_89": {"name": "Ognjen", "department": ["Warehouse"], "chat_id": None},
@@ -70,6 +78,9 @@ TEAM_HANDLES = {
     "cb9999999999": {"name": "Dušan", "department": ["Safe Offers"], "chat_id": None},
     "jomlamladen": {"name": "Mladen", "department": ["Administration"], "chat_id": None},
 }
+
+# Active team directory — starts as fallback, updated from Notion
+TEAM_HANDLES = dict(FALLBACK_TEAM_HANDLES)
 
 # File to persist chat IDs between restarts
 CHAT_IDS_FILE = "chat_ids.json"
@@ -249,6 +260,102 @@ notion = NotionClient()
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# NOTION TEAM DIRECTORY SYNC
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+async def sync_team_directory():
+    """
+    Fetch team members from Notion Team Directory page.
+
+    Expected format on Notion page (each line as a bullet or paragraph):
+        @handle | Display Name | Department1, Department2
+
+    Example:
+        @marcus_agent | Marcus | Marketing, Administration
+        @nikonbelas | Niko | Marketing, Safe Offers
+        @lukawolk | Luka | Safe Offers, Marketing
+
+    Members added in Notion automatically become available.
+    Members removed from Notion keep working until bot restarts.
+    """
+    global TEAM_HANDLES
+
+    if not TEAM_DIRECTORY_PAGE_ID:
+        logger.info("TEAM_DIRECTORY_PAGE_ID not set — using fallback directory")
+        return
+
+    try:
+        result = await notion.get_page_content(TEAM_DIRECTORY_PAGE_ID)
+        if not result:
+            logger.warning("Could not read Team Directory page — keeping current directory")
+            return
+
+        blocks = result.get("results", [])
+        raw_text = notion.extract_text_from_blocks(blocks)
+
+        if not raw_text.strip():
+            logger.warning("Team Directory page is empty — keeping current directory")
+            return
+
+        # Parse members from page content
+        new_handles = {}
+        lines = raw_text.split("\n")
+
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith("---") or line.startswith("#"):
+                continue
+
+            # Strip checkbox prefixes if present
+            if line.startswith(("✅ ", "⬜ ")):
+                line = line[2:].strip()
+
+            # Expected: @handle | Name | Dept1, Dept2
+            parts = [p.strip() for p in line.split("|")]
+            if len(parts) >= 2:
+                handle = parts[0].lstrip("@").strip()
+                name = parts[1].strip()
+                departments = []
+                if len(parts) >= 3:
+                    departments = [d.strip() for d in parts[2].split(",") if d.strip()]
+
+                if handle and name:
+                    # Preserve existing chat_id if member was already registered
+                    existing_chat_id = None
+                    if handle in TEAM_HANDLES:
+                        existing_chat_id = TEAM_HANDLES[handle].get("chat_id")
+
+                    new_handles[handle] = {
+                        "name": name,
+                        "department": departments or ["General"],
+                        "chat_id": existing_chat_id,
+                    }
+
+        if new_handles:
+            # Merge: keep chat_ids from current TEAM_HANDLES for existing members
+            old_count = len(TEAM_HANDLES)
+            TEAM_HANDLES.clear()
+            TEAM_HANDLES.update(new_handles)
+
+            # Re-apply saved chat IDs from file
+            load_chat_ids()
+
+            added = len(TEAM_HANDLES) - old_count
+            logger.info(f"Team Directory synced: {len(TEAM_HANDLES)} members"
+                       f" (was {old_count}, delta {added:+d})")
+        else:
+            logger.warning("No valid members parsed from Team Directory — keeping current directory")
+
+    except Exception as e:
+        logger.error(f"Error syncing Team Directory: {e}")
+
+
+async def refresh_team_directory(context: ContextTypes.DEFAULT_TYPE):
+    """Job: periodically refresh team directory from Notion"""
+    await sync_team_directory()
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # OUTBOX PARSER
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -258,13 +365,17 @@ def parse_outbox_messages(raw_text: str) -> List[Dict]:
 
     Expected format:
     ---
-    TO: @handle (or GROUP)
-    TYPE: PERSONAL | GROUP | ESCALATION
-    FROM: Omni Sight
+    TO: @handle (or GROUP or ADMIN)
+    TYPE: PERSONAL | GROUP | ESCALATION | ADMIN
+    FROM: Omni Sight | Stratex
     DATE: 2026-03-16
     ---
     Message content here
     ---
+
+    Also supports simpler format without separators:
+    TO: @handle
+    Message content on next lines
     """
     messages = []
     blocks = raw_text.split("---")
@@ -273,29 +384,60 @@ def parse_outbox_messages(raw_text: str) -> List[Dict]:
     while i < len(blocks):
         block = blocks[i].strip()
 
+        # Skip empty blocks and already-sent confirmations
+        if not block or block.startswith("✅ SENT"):
+            i += 1
+            continue
+
         # Look for TO: header
-        if block.startswith("TO:") or "\nTO:" in block:
+        if block.upper().startswith("TO:") or "\nTO:" in block.upper():
             lines = block.split("\n")
-            msg = {"to": None, "type": "PERSONAL", "from": None, "date": None, "content": "", "raw": block}
+            msg = {"to": None, "type": "PERSONAL", "from": "TeamFlow", "date": None, "content": "", "raw": block}
+            content_lines = []
+            header_done = False
 
             for line in lines:
-                line = line.strip()
-                if line.startswith("TO:"):
-                    msg["to"] = line.replace("TO:", "").strip()
-                elif line.startswith("TYPE:"):
-                    msg["type"] = line.replace("TYPE:", "").strip()
-                elif line.startswith("FROM:"):
-                    msg["from"] = line.replace("FROM:", "").strip()
-                elif line.startswith("DATE:"):
-                    msg["date"] = line.replace("DATE:", "").strip()
+                line_stripped = line.strip()
+                line_upper = line_stripped.upper()
 
-            # Next block is the message content
+                if line_upper.startswith("TO:"):
+                    msg["to"] = line_stripped[3:].strip()
+                elif line_upper.startswith("TYPE:"):
+                    msg["type"] = line_stripped[5:].strip().upper()
+                elif line_upper.startswith("FROM:"):
+                    msg["from"] = line_stripped[5:].strip()
+                elif line_upper.startswith("DATE:"):
+                    msg["date"] = line_stripped[5:].strip()
+                    header_done = True
+                elif header_done and line_stripped:
+                    # Lines after headers are inline content
+                    content_lines.append(line_stripped)
+
+            # Check next block for message body (standard separator format)
             if i + 1 < len(blocks):
-                msg["content"] = blocks[i + 1].strip()
-                i += 1
+                next_block = blocks[i + 1].strip()
+                # Only use next block as content if it's NOT a header block and NOT a sent confirmation
+                if next_block and not next_block.upper().startswith("TO:") and not next_block.startswith("✅ SENT"):
+                    msg["content"] = next_block
+                    i += 1
+
+            # If no content from next block, use inline content
+            if not msg["content"] and content_lines:
+                msg["content"] = "\n".join(content_lines)
+
+            # Auto-detect type from TO field
+            if msg["to"]:
+                to_upper = msg["to"].upper()
+                if to_upper == "GROUP":
+                    msg["type"] = "GROUP"
+                elif to_upper == "ADMIN":
+                    msg["type"] = "ADMIN"
+                elif to_upper == "ESCALATION":
+                    msg["type"] = "ESCALATION"
 
             if msg["to"] and msg["content"]:
                 messages.append(msg)
+                logger.debug(f"Parsed outbox message: TO={msg['to']} TYPE={msg['type']} FROM={msg['from']}")
 
         i += 1
 
@@ -518,13 +660,18 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     username = user.username
 
+    # Try a fresh sync in case member was just added to Notion
+    if username and username not in TEAM_HANDLES:
+        await sync_team_directory()
+
     if username and username in TEAM_HANDLES:
         TEAM_HANDLES[username]["chat_id"] = update.effective_chat.id
         save_chat_ids()
+        dept_str = ", ".join(TEAM_HANDLES[username]["department"])
         await update.message.reply_text(
             f"✅ Welcome {TEAM_HANDLES[username]['name']}!\n\n"
             f"You're registered for TeamFlow notifications.\n"
-            f"Department: {', '.join(TEAM_HANDLES[username]['department'])}\n\n"
+            f"Department: {dept_str}\n\n"
             f"Commands:\n"
             f"/status — Check your pending tasks\n"
             f"/brief — Get today's morning brief\n"
@@ -532,10 +679,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         logger.info(f"Registered {username} with chat_id {update.effective_chat.id}")
     else:
+        source = "Notion Team Directory" if TEAM_DIRECTORY_PAGE_ID else "the team directory"
         await update.message.reply_text(
             f"👋 Hi {user.first_name}!\n\n"
-            f"Your Telegram username (@{username}) is not in the TeamFlow directory.\n"
-            f"Contact Marcus to be added."
+            f"Your Telegram username (@{username}) is not in {source}.\n"
+            f"Ask an admin to add you and then try /start again."
         )
 
 
@@ -543,7 +691,7 @@ async def cmd_setup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Setup command for Marcus to register group chat IDs"""
     user = update.effective_user
     if user.username not in OWNER_USERNAMES:
-        await update.message.reply_text("⛔ Only authorized admins can use /setup")
+        await update.message.reply_text("⟔ Only authorized admins can use /setup")
         return
 
     chat = update.effective_chat
@@ -650,7 +798,7 @@ async def cmd_force_brief(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Force send morning brief (admin only)"""
     user = update.effective_user
     if user.username not in OWNER_USERNAMES:
-        await update.message.reply_text("⛔ Only authorized admins can use /force_brief")
+        await update.message.reply_text("⟔ Only authorized admins can use /force_brief")
         return
 
     await update.message.reply_text("📋 Forcing morning brief delivery...")
@@ -729,6 +877,12 @@ async def health_check():
 # MAIN
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+async def post_init(application: Application):
+    """Run after application initialization — sync team directory from Notion"""
+    await sync_team_directory()
+    logger.info(f"Team directory loaded: {len(TEAM_HANDLES)} members")
+
+
 def main():
     """Start the bot"""
     # Validate config
@@ -739,11 +893,11 @@ def main():
         logger.error("NOTION_API_KEY not set! Set it in environment variables.")
         return
 
-    # Load saved chat IDs
+    # Load saved chat IDs (fallback directory gets chat IDs immediately)
     load_chat_ids()
 
-    # Build application
-    app = Application.builder().token(BOT_TOKEN).build()
+    # Build application with post_init hook for async Notion sync
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
     # Register command handlers
     app.add_handler(CommandHandler("start", cmd_start))
@@ -771,6 +925,14 @@ def main():
         name="outbox_poll"
     )
 
+    # Refresh team directory from Notion every 5 minutes
+    job_queue.run_repeating(
+        refresh_team_directory,
+        interval=DIRECTORY_REFRESH_INTERVAL,
+        first=60,
+        name="directory_refresh"
+    )
+
     # Morning brief at 09:05 (5 min after Omni Sight runs at 09:00)
     brief_time = datetime.now(TZ).replace(
         hour=MORNING_BRIEF_HOUR,
@@ -786,12 +948,14 @@ def main():
     )
 
     logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    logger.info("🤖 TeamFlow Bot v2.0 Starting")
+    logger.info("🤖 TeamFlow Bot v3.0 Starting")
     logger.info(f"📬 Outbox polling: every {OUTBOX_POLL_INTERVAL}s")
     logger.info(f"📋 Morning brief: {MORNING_BRIEF_HOUR}:{MORNING_BRIEF_MINUTE:02d}")
     logger.info(f"🌍 Timezone: {TZ}")
     logger.info(f"👥 Team Leaders Group: {'SET' if ADMIN_GROUP_ID else 'NOT SET'}")
     logger.info(f"🔒 Safe Offers Group: {'SET' if SAFE_OFFERS_GROUP_ID else 'NOT SET'}")
+    logger.info(f"📇 Team Directory: {'NOTION' if TEAM_DIRECTORY_PAGE_ID else 'FALLBACK'}")
+    logger.info(f"👤 Team Members: {len(TEAM_HANDLES)}")
     logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
     # Start health check server in background
