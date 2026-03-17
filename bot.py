@@ -740,7 +740,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📊 *Status for {name}*\n\n"
         f"Omni Sight monitors your tasks automatically.\n"
         f"Check your hub's Fix Tasks in Notion for details.\n\n"
-        f"Mention @OmniSight in Notion for a personalized update.",
+        f"Mention @Omni_Sight in Notion for a personalized update.",
         parse_mode=ParseMode.MARKDOWN,
     )
 
