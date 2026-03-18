@@ -33,9 +33,12 @@ import json
 import logging
 import asyncio
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, time as dtime
 from typing import List, Dict, Optional, Callable
 from functools import wraps
+
+import pytz
+import aiohttp
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -44,8 +47,6 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
-
-import anthropic
 
 # ============================================================================
 # CONFIGURATION
@@ -79,32 +80,16 @@ HUB_DB_MAP = {
     "Resell": CENTRAL_TASKS_DB_ID,
 }
 
-# Group IDs (where to broadcast reports)
-MARKETING_GROUP_ID = os.getenv("MARKETING_GROUP_ID", "-1002346347047")
-SALES_GROUP_ID = os.getenv("SALES_GROUP_ID", "-1002397598631")
-WAREHOUSE_GROUP_ID = os.getenv("WAREHOUSE_GROUP_ID", "-1002223313547")
-SAFE_OFFERS_GROUP_ID = os.getenv("SAFE_OFFERS_GROUP_ID", "-1002464688486")
-RESELL_GROUP_ID = os.getenv("RESELL_GROUP_ID", "-1002464729123")
+# Telegram Group Chat IDs
+ADMIN_GROUP_ID = os.getenv("ADMIN_GROUP_ID")
+SAFE_OFFERS_GROUP_ID = os.getenv("SAFE_OFFERS_GROUP_ID")
 
-HUB_GROUP_MAP = {
-    "Marketing": int(MARKETING_GROUP_ID),
-    "Sales": int(SALES_GROUP_ID),
-    "Warehouse": int(WAREHOUSE_GROUP_ID),
-    "Safe Offers": int(SAFE_OFFERS_GROUP_ID),
-    "Resell": int(RESELL_GROUP_ID),
-}
+# Timezone — Zurich
+TZ = pytz.timezone(os.getenv("TIMEZONE", "Europe/Zurich"))
 
-# Timezone
-TZ = timezone.utc
-
-# Polling & scheduled job intervals (seconds)
-OUTBOX_POLL_INTERVAL = 60
-MORNING_MOTIVATION_TIME = "08:00"  # 8 AM
-WORK_START_REMINDER_TIME = "08:30"  # 8:30 AM
-PERSONAL_TASK_BRIEFING_TIME = "10:00"  # 10 AM
-MORNING_BRIEFING_TIME = "09:00"  # 9 AM (for groups)
-EOD_RECAP_TIME = "17:00"  # 5 PM
-WEEKLY_REPORT_TIME = "17:00"  # 5 PM (Fridays)
+# Polling intervals
+OUTBOX_POLL_INTERVAL = int(os.getenv("OUTBOX_POLL_INTERVAL", "60"))
+DIRECTORY_REFRESH_INTERVAL = int(os.getenv("DIRECTORY_REFRESH_INTERVAL", "300"))
 
 # Owner access for admin commands
 OWNER_USERNAMES = {"marcus_agent", "mate_marsic"}
@@ -628,84 +613,70 @@ def get_eod_message() -> str:
 
 def format_agent_header(agent_name: str) -> str:
     """Format a header for AI agent responses."""
-    icons = {
-        "Omni Sight": "👁️",
-        "Task Planner": "📋",
-        "Data Analyst": "📊",
-        "Kudos Bot": "🏆",
-        "Standup Generator": "🎤",
-    }
-    icon = icons.get(agent_name, "🤖")
-    return f"{icon} *{agent_name}:*\n"
+    if "stratex" in agent_name.lower():
+        return f"🧠 *Stratex*\n{'━' * 20}\n"
+    else:
+        return f"🔍 *Omni Sight*\n{'━' * 20}\n"
 
 # ============================================================================
 # CLAUDE AI ENGINE
 # ============================================================================
 
-client_anthropic = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+OMNI_SIGHT_SYSTEM = """You are Omni Sight — an AI operations monitoring agent for TeamFlow.
+Your role: analyze task data, identify bottlenecks, flag overdue items, spot patterns in team velocity.
+Tone: professional, direct, data-driven. Use clear metrics and actionable observations.
+Keep responses concise (max 800 chars for Telegram). Use bullet points sparingly.
+Never use emojis excessively — max 2-3 per message. Always end with one clear action item.
+Language: English only."""
 
-SYSTEM_PROMPT_BASE = """You are TeamFlow, an AI assistant for task management and team coordination.
-You have access to Notion databases containing team tasks, assignments, and progress tracking.
-Be helpful, concise, and data-driven. Use the information provided to give actionable insights.
-Keep responses under 800 characters for Telegram compatibility."""
+STRATEX_SYSTEM = """You are Stratex — an AI strategy and optimization agent for TeamFlow.
+Your role: analyze workload distribution, suggest priority rebalancing, recommend process improvements, deliver strategic insights.
+Tone: visionary but practical, motivational but grounded in data. Think like a COO.
+Keep responses concise (max 800 chars for Telegram). Focus on the big picture.
+Never use emojis excessively — max 2-3 per message. Always end with a strategic recommendation.
+Language: English only."""
 
-SYSTEM_PROMPT_OMNI_SIGHT = SYSTEM_PROMPT_BASE + """
-You are Omni Sight, an expert analyst of team tasks and progress.
-Answer questions about task status, workload, timelines, and team performance.
-Be specific—reference actual task names, assignees, and dates when answering."""
+async def ask_claude(persona: str, prompt: str, context_data: str = "") -> Optional[str]:
+    """Call Claude API with the specified persona via aiohttp. Returns AI response or None."""
+    if not ANTHROPIC_API_KEY:
+        logger.warning("ANTHROPIC_API_KEY not set — skipping AI generation")
+        return None
 
-SYSTEM_PROMPT_TASK_PLANNER = SYSTEM_PROMPT_BASE + """
-You are Task Planner, a strategic advisor for breaking down work.
-Help users organize tasks, prioritize workload, and create action plans.
-Suggest efficient scheduling and dependency management."""
+    system_prompt = OMNI_SIGHT_SYSTEM if persona == "omni_sight" else STRATEX_SYSTEM
 
-SYSTEM_PROMPT_DATA_ANALYST = SYSTEM_PROMPT_BASE + """
-You are Data Analyst, focused on patterns and insights.
-Analyze team performance, identify bottlenecks, suggest improvements.
-Be data-driven and provide actionable recommendations."""
+    user_message = prompt
+    if context_data:
+        user_message = f"{prompt}\n\nHere is the current data:\n{context_data}"
 
-SYSTEM_PROMPT_KUDOS_BOT = SYSTEM_PROMPT_BASE + """
-You are Kudos Bot, the team's cheerleader and recognition agent.
-Celebrate wins, acknowledge effort, and motivate the team.
-Be enthusiastic, warm, and genuine in your praise."""
-
-SYSTEM_PROMPT_STANDUP = SYSTEM_PROMPT_BASE + """
-You are Standup Generator, creating clear daily standups.
-Summarize what was done, what's next, and blockers.
-Format for team communication (brief, structured, actionable)."""
-
-async def ask_claude(agent_type: str, prompt: str, context_data: str = "") -> Optional[str]:
-    """Ask Claude a question using the specified agent persona."""
-    system_map = {
-        "omni_sight": SYSTEM_PROMPT_OMNI_SIGHT,
-        "task_planner": SYSTEM_PROMPT_TASK_PLANNER,
-        "data_analyst": SYSTEM_PROMPT_DATA_ANALYST,
-        "kudos_bot": SYSTEM_PROMPT_KUDOS_BOT,
-        "standup": SYSTEM_PROMPT_STANDUP,
+    payload = {
+        "model": "claude-sonnet-4-20250514",
+        "max_tokens": 500,
+        "system": system_prompt,
+        "messages": [{"role": "user", "content": user_message}]
     }
 
-    system = system_map.get(agent_type, SYSTEM_PROMPT_BASE)
-
-    if context_data:
-        full_prompt = f"{prompt}\n\nContext Data:\n{context_data}"
-    else:
-        full_prompt = prompt
-
     try:
-        message = client_anthropic.messages.create(
-            model="claude-3-5-sonnet-20241022",
-            max_tokens=1024,
-            system=system,
-            messages=[
-                {"role": "user", "content": full_prompt}
-            ]
-        )
-
-        response = message.content[0].text if message.content else None
-        return response
-
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": ANTHROPIC_API_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    text = data.get("content", [{}])[0].get("text", "")
+                    return text.strip() if text else None
+                else:
+                    error = await resp.text()
+                    logger.error(f"Claude API error {resp.status}: {error[:200]}")
+                    return None
     except Exception as e:
-        logger.error(f"Error calling Claude: {e}")
+        logger.error(f"Claude API request failed: {e}")
         return None
 
 async def ai_morning_briefing(hub_name: str) -> Optional[str]:
@@ -745,7 +716,7 @@ async def ai_morning_briefing(hub_name: str) -> Optional[str]:
     4. One motivational sentence
     Keep it under 500 characters."""
 
-    return await ask_claude("task_planner", prompt, context_data)
+    return await ask_claude("omni_sight", prompt, context_data)
 
 async def ai_eod_recap(hub_name: str) -> Optional[str]:
     """Generate EOD recap for a hub."""
@@ -780,7 +751,7 @@ async def ai_eod_recap(hub_name: str) -> Optional[str]:
     4. Closing motivational note
     Keep it under 400 characters."""
 
-    return await ask_claude("data_analyst", prompt, context_data)
+    return await ask_claude("stratex", prompt, context_data)
 
 async def ai_motivation(name: str) -> Optional[str]:
     """Generate personalized motivation for a team member."""
@@ -788,7 +759,7 @@ async def ai_motivation(name: str) -> Optional[str]:
     Be warm, specific to work/productivity, and encouraging.
     Keep it under 150 characters."""
 
-    return await ask_claude("kudos_bot", prompt)
+    return await ask_claude("stratex", prompt)
 
 async def ai_personal_insight(handle: str) -> Optional[str]:
     """Generate personal work insight for a team member."""
@@ -811,7 +782,7 @@ async def ai_personal_insight(handle: str) -> Optional[str]:
     3. Encouraging observation
     Keep it under 400 characters."""
 
-    return await ask_claude("task_planner", prompt, context_data)
+    return await ask_claude("omni_sight", prompt, context_data)
 
 async def ai_weekly_analysis() -> Optional[str]:
     """Generate weekly performance analysis."""
@@ -849,7 +820,7 @@ async def ai_weekly_analysis() -> Optional[str]:
     4. One strategic recommendation
     Keep it under 600 characters."""
 
-    return await ask_claude("data_analyst", prompt, context_data)
+    return await ask_claude("stratex", prompt, context_data)
 
 # ============================================================================
 # OUTBOX PARSER
@@ -1009,29 +980,28 @@ async def job_personal_task_briefing(context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error in job_personal_task_briefing: {e}")
 
 async def job_morning_brief(context: ContextTypes.DEFAULT_TYPE):
-    """Send morning briefing to hub group chats."""
+    """Send morning briefing to admin group."""
     try:
-        for hub_name, group_id in HUB_GROUP_MAP.items():
-            briefing = await ai_morning_briefing(hub_name)
-            if briefing:
-                msg = f"🌅 *{hub_name} Hub - Morning Briefing*\n\n{briefing}"
-                await send_group_message(context.bot, group_id, msg)
-            else:
-                summary = await get_hub_task_summary(hub_name)
-                msg = f"📊 *{hub_name} Hub Status:*\n"
-                msg += f"Total: {summary['total']} | Done: {summary['completed']} | In Progress: {summary['in_progress']} | Not Started: {summary['not_started']}"
-                await send_group_message(context.bot, group_id, msg)
+        if not ADMIN_GROUP_ID:
+            return
+        all_summaries = []
+        for hub_name in ["Marketing", "Sales", "Warehouse", "Safe Offers", "Resell"]:
+            summary = await get_hub_task_summary(hub_name)
+            all_summaries.append(f"*{hub_name}:* {summary['completed']}/{summary['total']} done, {summary['overdue']} overdue")
+        msg = f"📋 *Morning Brief*\n{'━' * 25}\n\n" + "\n".join(all_summaries)
+        await send_group_message(context.bot, int(ADMIN_GROUP_ID), msg)
     except Exception as e:
         logger.error(f"Error in job_morning_brief: {e}")
 
 async def job_eod_group(context: ContextTypes.DEFAULT_TYPE):
-    """Send EOD recap to hub group chats."""
+    """Send EOD recap to admin group."""
     try:
-        for hub_name, group_id in HUB_GROUP_MAP.items():
-            recap = await ai_eod_recap(hub_name)
-            if recap:
-                msg = f"🌆 *{hub_name} Hub - EOD Recap*\n\n{recap}"
-                await send_group_message(context.bot, group_id, msg)
+        if not ADMIN_GROUP_ID:
+            return
+        eod_msg = get_eod_message()
+        header = format_agent_header("Stratex")
+        msg = f"{header}🌆 *End of Day*\n\n{eod_msg}"
+        await send_group_message(context.bot, int(ADMIN_GROUP_ID), msg)
     except Exception as e:
         logger.error(f"Error in job_eod_group: {e}")
 
@@ -1053,15 +1023,16 @@ async def job_eod_personal(context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error in job_eod_personal: {e}")
 
 async def job_weekly_report(context: ContextTypes.DEFAULT_TYPE):
-    """Send weekly performance report."""
+    """Send weekly performance report to admin group."""
     try:
+        if not ADMIN_GROUP_ID:
+            return
         analysis = await ai_weekly_analysis()
         if not analysis:
             return
-
-        msg = f"📈 *Weekly Team Performance Report*\n\n{analysis}"
-        for group_id in HUB_GROUP_MAP.values():
-            await send_group_message(context.bot, group_id, msg)
+        header = format_agent_header("Omni Sight")
+        msg = f"{header}📊 *Weekly Report*\n{'━' * 25}\n\n{analysis}"
+        await send_group_message(context.bot, int(ADMIN_GROUP_ID), msg)
     except Exception as e:
         logger.error(f"Error in job_weekly_report: {e}")
 
@@ -1217,7 +1188,7 @@ async def cmd_week(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     analysis = await ai_weekly_analysis()
     if analysis:
-        header = format_agent_header("Data Analyst")
+        header = format_agent_header("Omni Sight")
         await update.message.reply_text(
             f"{header}{analysis}",
             parse_mode=ParseMode.MARKDOWN
@@ -1235,7 +1206,7 @@ async def cmd_brief(update: Update, context: ContextTypes.DEFAULT_TYPE):
     insight = await ai_personal_insight(username)
     if insight:
         name = get_name_by_handle(username)
-        header = format_agent_header("Task Planner")
+        header = format_agent_header("Stratex")
         await update.message.reply_text(
             f"{header}*Briefing for {name}:*\n\n{insight}",
             parse_mode=ParseMode.MARKDOWN
@@ -1366,8 +1337,12 @@ async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📢 *Broadcasting to all hubs...*", parse_mode=ParseMode.MARKDOWN)
 
     msg = f"📢 *Team Announcement:*\n\n{message}"
-    for group_id in HUB_GROUP_MAP.values():
-        await send_group_message(context.bot, group_id, msg)
+    chat_ids = load_chat_ids()
+    for handle, chat_id in chat_ids.items():
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode=ParseMode.MARKDOWN)
+        except Exception as e:
+            logger.warning(f"Could not broadcast to {handle}: {e}")
 
     await update.message.reply_text("✅ Broadcast sent to all hubs!")
 
@@ -1502,9 +1477,9 @@ async def cmd_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("📋 *Task Planner is analyzing...*", parse_mode=ParseMode.MARKDOWN)
 
-    response = await ask_claude("task_planner", prompt, context_data)
+    response = await ask_claude("stratex", prompt, context_data)
     if response:
-        header = format_agent_header("Task Planner")
+        header = format_agent_header("Stratex")
         await update.message.reply_text(
             f"{header}*Planning for {name}:*\n\n{response}",
             parse_mode=ParseMode.MARKDOWN,
@@ -1550,9 +1525,9 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
     4. One actionable recommendation
     Keep response under 600 characters."""
 
-    response = await ask_claude("data_analyst", prompt, context_data)
+    response = await ask_claude("omni_sight", prompt, context_data)
     if response:
-        header = format_agent_header("Data Analyst")
+        header = format_agent_header("Omni Sight")
         await update.message.reply_text(
             f"{header}*Analysis for {hub_name} Hub:*\n\n{response}",
             parse_mode=ParseMode.MARKDOWN,
@@ -1574,9 +1549,9 @@ async def cmd_kudos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Mention their dedication, teamwork, or impact.
     Keep it under 300 characters and make it personal."""
 
-    response = await ask_claude("kudos_bot", prompt)
+    response = await ask_claude("stratex", prompt)
     if response:
-        header = format_agent_header("Kudos Bot")
+        header = format_agent_header("Stratex")
         await update.message.reply_text(
             f"{header}*Recognition for {recipient_name}:*\n\n{response}",
             parse_mode=ParseMode.MARKDOWN,
@@ -1615,9 +1590,9 @@ async def cmd_standup(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("🎤 *Standup Generator is preparing...*", parse_mode=ParseMode.MARKDOWN)
 
-    response = await ask_claude("standup", prompt, context_data)
+    response = await ask_claude("omni_sight", prompt, context_data)
     if response:
-        header = format_agent_header("Standup Generator")
+        header = format_agent_header("Omni Sight")
         await update.message.reply_text(
             f"{header}*Daily Standup for {name}:*\n\n{response}",
             parse_mode=ParseMode.MARKDOWN,
@@ -1674,90 +1649,154 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
         )
 
 # ============================================================================
-# HEALTH CHECK
+# HEALTH CHECK (HTTP server for Render)
 # ============================================================================
 
-async def health_check(context: ContextTypes.DEFAULT_TYPE):
-    """Periodic health check to ensure bot is functioning."""
-    try:
-        db_id = CENTRAL_TASKS_DB_ID
-        if db_id:
-            results = await notion.query_database(db_id)
-            if results is not None:
-                logger.info(f"✅ Health check passed. Found {len(results.get('results', []))} tasks in central DB.")
-            else:
-                logger.warning("⚠️ Health check: Could not query central database.")
-        else:
-            logger.warning("⚠️ Health check: CENTRAL_TASKS_DB_ID not configured.")
-    except Exception as e:
-        logger.error(f"❌ Health check failed: {e}")
+async def health_check():
+    """Start aiohttp web server so Render keeps the service alive."""
+    from aiohttp import web
+    async def handle(request):
+        now = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
+        return web.Response(
+            text=f"TeamFlow Bot v5.1 is running ✅\nTime: {now}\nMembers: {len(TEAM_HANDLES or FALLBACK_TEAM_HANDLES)}"
+        )
+    app = web.Application()
+    app.router.add_get("/", handle)
+    app.router.add_get("/health", handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.getenv("PORT", "10000"))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logger.info(f"Health check running on port {port}")
 
 # ============================================================================
 # MAIN
 # ============================================================================
 
-async def main():
+async def post_init(application: Application):
+    """Run after bot initialization."""
+    await sync_team_directory()
+    logger.info(f"Team directory loaded: {len(TEAM_HANDLES or FALLBACK_TEAM_HANDLES)} members")
+
+def main():
     """Initialize and run the bot."""
-    logger.info("=" * 60)
-    logger.info("TeamFlow Telegram Bot v5.1")
-    logger.info("AI-Powered Task & Team Management")
-    logger.info("=" * 60)
+    if not BOT_TOKEN:
+        logger.error("BOT_TOKEN not set!")
+        return
+    if not NOTION_API_KEY:
+        logger.error("NOTION_API_KEY not set!")
+        return
 
-    application = Application.builder().token(BOT_TOKEN).build()
+    logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    logger.info("🤖 TeamFlow Bot v5.1 Starting")
+    logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    logger.info(f"🌍 Timezone: {TZ}")
+    logger.info(f"📬 Outbox polling: every {OUTBOX_POLL_INTERVAL}s")
+    logger.info(f"👥 Admin Group: {'SET' if ADMIN_GROUP_ID else 'NOT SET'}")
+    logger.info(f"🔒 Safe Offers Group: {'SET' if SAFE_OFFERS_GROUP_ID else 'NOT SET'}")
+    logger.info(f"📇 Central Tasks DB: {CENTRAL_TASKS_DB_ID}")
+    logger.info("AI Commands: /ask /plan /analyze /kudos /standup")
+    logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-    # Command handlers
-    application.add_handler(CommandHandler("start", cmd_start))
-    application.add_handler(CommandHandler("help", cmd_help))
-    application.add_handler(CommandHandler("status", cmd_status))
-    application.add_handler(CommandHandler("mytasks", cmd_mytasks))
-    application.add_handler(CommandHandler("hub", cmd_hub))
-    application.add_handler(CommandHandler("week", cmd_week))
-    application.add_handler(CommandHandler("brief", cmd_brief))
-    application.add_handler(CommandHandler("settings", cmd_settings))
-    application.add_handler(CallbackQueryHandler(settings_callback))
-
-    # Admin commands
-    application.add_handler(CommandHandler("setup", cmd_setup))
-    application.add_handler(CommandHandler("force_brief", cmd_force_brief))
-    application.add_handler(CommandHandler("report", cmd_report))
-    application.add_handler(CommandHandler("outbox", cmd_outbox))
-    application.add_handler(CommandHandler("broadcast", cmd_broadcast))
-    application.add_handler(CommandHandler("teamstatus", cmd_teamstatus))
-
-    # AI commands
-    application.add_handler(CommandHandler("ask", cmd_ask))
-    application.add_handler(CommandHandler("plan", cmd_plan))
-    application.add_handler(CommandHandler("analyze", cmd_analyze))
-    application.add_handler(CommandHandler("kudos", cmd_kudos))
-    application.add_handler(CommandHandler("standup", cmd_standup))
-
-    # Error handling
-    application.add_handler(MessageHandler(filters.TEXT & filters.COMMAND, handle_unknown_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_private_text))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS, handle_group_message))
-
-    # Scheduled jobs
-    job_queue = application.job_queue
-    job_queue.run_repeating(poll_outbox, interval=OUTBOX_POLL_INTERVAL, first=10)
-    job_queue.run_daily(job_morning_motivation, time=datetime.strptime(MORNING_MOTIVATION_TIME, "%H:%M").time())
-    job_queue.run_daily(job_work_start_reminder, time=datetime.strptime(WORK_START_REMINDER_TIME, "%H:%M").time())
-    job_queue.run_daily(job_personal_task_briefing, time=datetime.strptime(PERSONAL_TASK_BRIEFING_TIME, "%H:%M").time())
-    job_queue.run_daily(job_morning_brief, time=datetime.strptime(MORNING_BRIEFING_TIME, "%H:%M").time())
-    job_queue.run_daily(job_eod_personal, time=datetime.strptime(EOD_RECAP_TIME, "%H:%M").time())
-    job_queue.run_daily(job_eod_group, time=datetime.strptime(EOD_RECAP_TIME, "%H:%M").time())
-    job_queue.run_repeating(health_check, interval=3600, first=60)
-
-    # Friday weekly report
-    job_queue.run_daily(
-        job_weekly_report,
-        time=datetime.strptime(WEEKLY_REPORT_TIME, "%H:%M").time(),
-        days=(4,)
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .post_init(post_init)
+        .build()
     )
 
-    logger.info("✅ Bot initialized successfully")
-    logger.info("🚀 Starting polling...")
+    # ── Command Handlers ──
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("mytasks", cmd_mytasks))
+    app.add_handler(CommandHandler("hub", cmd_hub))
+    app.add_handler(CommandHandler("week", cmd_week))
+    app.add_handler(CommandHandler("brief", cmd_brief))
+    app.add_handler(CommandHandler("settings", cmd_settings))
 
-    await application.run_polling()
+    # ── Admin Commands ──
+    app.add_handler(CommandHandler("setup", cmd_setup))
+    app.add_handler(CommandHandler("force_brief", cmd_force_brief))
+    app.add_handler(CommandHandler("report", cmd_report))
+    app.add_handler(CommandHandler("outbox", cmd_outbox))
+    app.add_handler(CommandHandler("broadcast", cmd_broadcast))
+    app.add_handler(CommandHandler("teamstatus", cmd_teamstatus))
+
+    # ── AI-Powered Commands (v5.0) ──
+    app.add_handler(CommandHandler("ask", cmd_ask))
+    app.add_handler(CommandHandler("plan", cmd_plan))
+    app.add_handler(CommandHandler("analyze", cmd_analyze))
+    app.add_handler(CommandHandler("kudos", cmd_kudos))
+    app.add_handler(CommandHandler("standup", cmd_standup))
+
+    # ── Settings inline buttons ──
+    app.add_handler(CallbackQueryHandler(settings_callback))
+
+    # ── Smart error handling ──
+    app.add_handler(MessageHandler(
+        filters.ChatType.PRIVATE & filters.COMMAND, handle_unknown_command,
+    ))
+    app.add_handler(MessageHandler(
+        filters.ChatType.GROUPS & filters.COMMAND, handle_unknown_command,
+    ))
+    app.add_handler(MessageHandler(
+        filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, handle_private_text,
+    ))
+    app.add_handler(MessageHandler(
+        filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND, handle_group_message,
+    ))
+
+    # ── Scheduled Jobs ──
+    jq = app.job_queue
+    jq.run_repeating(poll_outbox, interval=OUTBOX_POLL_INTERVAL, first=10, name="outbox_poll")
+    jq.run_repeating(lambda ctx: sync_team_directory(), interval=DIRECTORY_REFRESH_INTERVAL, first=60, name="dir_refresh")
+
+    jq.run_daily(
+        job_morning_motivation,
+        time=dtime(hour=9, minute=0, second=0, tzinfo=TZ),
+        days=(0, 1, 2, 3, 4, 5), name="morning_motivation",
+    )
+    jq.run_daily(
+        job_morning_brief,
+        time=dtime(hour=9, minute=5, second=0, tzinfo=TZ),
+        days=(0, 1, 2, 3, 4, 5), name="morning_brief",
+    )
+    jq.run_daily(
+        job_work_start_reminder,
+        time=dtime(hour=9, minute=45, second=0, tzinfo=TZ),
+        days=(0, 1, 2, 3, 4, 5), name="work_start_reminder",
+    )
+    jq.run_daily(
+        job_personal_task_briefing,
+        time=dtime(hour=10, minute=0, second=0, tzinfo=TZ),
+        days=(0, 1, 2, 3, 4, 5), name="task_briefing",
+    )
+    jq.run_daily(
+        job_eod_group,
+        time=dtime(hour=18, minute=0, second=0, tzinfo=TZ),
+        days=(0, 1, 2, 3, 4, 5), name="eod_group",
+    )
+    jq.run_daily(
+        job_eod_personal,
+        time=dtime(hour=18, minute=15, second=0, tzinfo=TZ),
+        days=(0, 1, 2, 3, 4, 5), name="eod_personal",
+    )
+    jq.run_daily(
+        job_weekly_report,
+        time=dtime(hour=10, minute=30, second=0, tzinfo=TZ),
+        days=(0,), name="weekly_report",
+    )
+
+    logger.info("Scheduled: 09:00 motivation | 09:05 brief | 09:45 start reminder")
+    logger.info("Scheduled: 10:00 task DMs | 18:00 EOD group | 18:15 EOD DMs")
+    logger.info("Scheduled: Mon 10:30 weekly report")
+
+    loop = asyncio.get_event_loop()
+    loop.create_task(health_check())
+
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
